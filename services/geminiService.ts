@@ -48,11 +48,13 @@ const METADATA_SCHEMA = {
 };
 
 // Models ordered by free tier access (best first)
-// Note: Model names may differ between v1 and v1beta APIs
-// Try listing models first, then fall back to known working names
-// gemini-2.5-flash doesn't exist - using correct model names
+// Note: These are fallback models if ListModels API fails
+// The app will always try to use models from ListModels API first
 const AVAILABLE_MODELS = [
-  'gemini-1.5-flash',        // Most widely available
+  'gemini-2.5-flash',        // Latest flash model (5 RPM free tier)
+  'gemini-3-flash',          // Latest model (5 RPM free tier)
+  'gemini-2.5-flash-lite',   // Lite version (10 RPM free tier)
+  'gemini-1.5-flash',        // Older flash model
   'gemini-1.5-flash-001',    // Specific version
   'gemini-1.5-pro',          // Pro version
   'gemini-1.5-pro-001',      // Specific pro version
@@ -295,8 +297,19 @@ Generate comprehensive metadata that maximizes discoverability while maintaining
         modelsToTry = availableModels;
       }
     } else {
-      // Auto mode - use available models
-      modelsToTry = availableModels;
+      // Auto mode - prioritize models with higher rate limits
+      // Sort models: prefer -lite versions (higher limits), then newer versions
+      modelsToTry = availableModels.sort((a, b) => {
+        // Prioritize -lite versions (usually have higher rate limits)
+        const aIsLite = a.includes('-lite');
+        const bIsLite = b.includes('-lite');
+        if (aIsLite && !bIsLite) return -1;
+        if (!aIsLite && bIsLite) return 1;
+        // Then prioritize newer versions (2.5, 3.0 over 1.5)
+        const aVersion = a.match(/gemini-([\d.]+)/)?.[1] || '0';
+        const bVersion = b.match(/gemini-([\d.]+)/)?.[1] || '0';
+        return parseFloat(bVersion) - parseFloat(aVersion);
+      });
     }
     
     for (const model of modelsToTry) {
