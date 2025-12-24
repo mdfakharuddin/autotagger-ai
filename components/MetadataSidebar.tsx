@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { FileItem } from '../types';
-import { calculateReadinessScore, validateMetadata } from '../services/fileUtils';
+import { calculateReadinessScore } from '../services/fileUtils';
 
 interface MetadataSidebarProps {
   file: FileItem;
@@ -20,7 +20,6 @@ const MetadataSidebar: React.FC<MetadataSidebarProps> = ({
 }) => {
   const [newTagInput, setNewTagInput] = useState('');
   const currentMeta = file.metadata;
-  const errors = validateMetadata(currentMeta);
   const score = calculateReadinessScore(currentMeta, currentMeta.rejectionRisks || []);
 
   const addKeyword = (input?: string) => {

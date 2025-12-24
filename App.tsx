@@ -808,7 +808,14 @@ function App() {
         try {
           csvFileName = existingCsvHandle.name;
           const csvContent = await fileSystemService.readCsvFile(existingCsvHandle);
-          processedFilesMap = parseCsvContent(csvContent);
+          const parsedCsv = parseCsvContent(csvContent);
+          // Convert array to Map for compatibility
+          processedFilesMap = new Map(parsedCsv.map(row => [row.filename, {
+            title: row.title,
+            keywords: row.tags.split(',').map(t => t.trim()).filter(Boolean),
+            category: '',
+            description: ''
+          }]));
           setToast({ message: `Found existing CSV with ${processedFilesMap.size} processed files. Skipping those.`, type: "success" });
         } catch (e) {
           console.warn('Error reading existing CSV:', e);

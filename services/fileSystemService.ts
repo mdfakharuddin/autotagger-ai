@@ -114,28 +114,44 @@ export class FileSystemService {
           const objectUrl = URL.createObjectURL(file);
           
           await new Promise<void>((resolve, reject) => {
-            img.onload = () => {
-              // Resize to max 800px for preview
-              const maxSize = 800;
-              let width = img.width;
-              let height = img.height;
-              if (width > maxSize || height > maxSize) {
-                const ratio = Math.min(maxSize / width, maxSize / height);
-                width = width * ratio;
-                height = height * ratio;
-              }
-              
-              canvas.width = width;
-              canvas.height = height;
-              ctx?.drawImage(img, 0, 0, width, height);
-              previewUrl = canvas.toDataURL('image/jpeg', 0.7);
+            const timeout = setTimeout(() => {
+              // Timeout fallback - use blob URL directly
               URL.revokeObjectURL(objectUrl);
+              previewUrl = URL.createObjectURL(file);
               resolve();
+            }, 10000); // 10 second timeout for image loading
+            
+            img.onload = () => {
+              clearTimeout(timeout);
+              try {
+                // Resize to max 800px for preview
+                const maxSize = 800;
+                let width = img.width;
+                let height = img.height;
+                if (width > maxSize || height > maxSize) {
+                  const ratio = Math.min(maxSize / width, maxSize / height);
+                  width = width * ratio;
+                  height = height * ratio;
+                }
+                
+                canvas.width = width;
+                canvas.height = height;
+                ctx?.drawImage(img, 0, 0, width, height);
+                previewUrl = canvas.toDataURL('image/jpeg', 0.7);
+                URL.revokeObjectURL(objectUrl);
+                resolve();
+              } catch (e) {
+                // If canvas fails, use blob URL
+                URL.revokeObjectURL(objectUrl);
+                previewUrl = URL.createObjectURL(file);
+                resolve();
+              }
             };
             
             img.onerror = () => {
+              clearTimeout(timeout);
               URL.revokeObjectURL(objectUrl);
-              // Fallback to regular blob URL
+              // Fallback to regular blob URL - DO NOT revoke this one
               previewUrl = URL.createObjectURL(file);
               resolve();
             };
@@ -143,12 +159,17 @@ export class FileSystemService {
             img.src = objectUrl;
           });
         } catch (e) {
-          // Fallback to regular blob URL
+          // Fallback to regular blob URL - DO NOT revoke this one
           previewUrl = URL.createObjectURL(file);
         }
       } else {
+        // For smaller images, use blob URL directly - DO NOT revoke
         previewUrl = URL.createObjectURL(file);
       }
+    } else {
+      // For non-images (videos), we'll handle preview separately
+      // But create a blob URL that won't be revoked until file is removed
+      previewUrl = URL.createObjectURL(file);
     }
     return { file, previewUrl };
   }
