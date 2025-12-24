@@ -43,9 +43,10 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
   const [csvFilename, setCsvFilename] = useState<string>('pitagger_export.csv');
   const [processingProgress, setProcessingProgress] = useState({ loaded: 0, total: 0 });
-  const [workingApiModel, setWorkingApiModel] = useState<{ apiKeyId: string; model: string } | null>(null);
+  const [workingApiModels, setWorkingApiModels] = useState<Array<{ apiKeyId: string; model: string; inUse: boolean }>>([]);
   const [allApisExhausted, setAllApisExhausted] = useState(false);
   const [apiModelTestResults, setApiModelTestResults] = useState<Map<string, { apiKeyId: string; model: string; works: boolean }>>(new Map());
+  const [isTestingApis, setIsTestingApis] = useState(false);
 
   const activeProcessingIds = useRef<Set<string>>(new Set());
   const GEMINI_FREE_TIER_LIMIT = REQUESTS_PER_MINUTE; // Conservative limit to avoid 429 errors
@@ -353,11 +354,41 @@ function App() {
     });
   }, []);
 
+  // Get next available API+model combination
+  const getNextAvailableApiModel = useCallback((): { apiKeyId: string; model: string } | null => {
+    const available = workingApiModels.find(w => !w.inUse);
+    if (available) {
+      // Mark as in use
+      setWorkingApiModels(prev => prev.map(w => 
+        w.apiKeyId === available.apiKeyId && w.model === available.model 
+          ? { ...w, inUse: true } 
+          : w
+      ));
+      return { apiKeyId: available.apiKeyId, model: available.model };
+    }
+    return null;
+  }, [workingApiModels]);
+
+  // Release API+model combination when done
+  const releaseApiModel = useCallback((apiKeyId: string, model: string) => {
+    setWorkingApiModels(prev => prev.map(w => 
+      w.apiKeyId === apiKeyId && w.model === model 
+        ? { ...w, inUse: false } 
+        : w
+    ));
+  }, []);
+
   const processFile = useCallback(async (item: FileItem) => {
     if (activeProcessingIds.current.has(item.id)) return;
     
-    const keySlot = getNextAvailableKeySlot();
-    if (!keySlot) return;
+    // Get available API+model combination
+    const apiModelCombo = getNextAvailableApiModel();
+    if (!apiModelCombo) {
+      // No available combinations, try to find one
+      const keySlot = getNextAvailableKeySlot();
+      if (!keySlot) return;
+      // Will use fallback logic below
+    }
 
     activeProcessingIds.current.add(item.id);
     
@@ -401,10 +432,20 @@ function App() {
       }
 
       // Use working API+model combination, or find a new one
-      let currentKeySlot = workingApiModel 
-        ? apiKeys.find(k => k.id === workingApiModel.apiKeyId) || keySlot
-        : keySlot;
-      let currentModel = workingApiModel?.model || styleMemory.selectedModel || 'auto';
+      let currentKeySlot = apiModelCombo
+        ? apiKeys.find(k => k.id === apiModelCombo.apiKeyId) || getNextAvailableKeySlot()
+        : getNextAvailableKeySlot();
+      
+      if (!currentKeySlot) {
+        activeProcessingIds.current.delete(item.id);
+        setProcessingCount(p => Math.max(0, p - 1));
+        if (apiModelCombo) {
+          releaseApiModel(apiModelCombo.apiKeyId, apiModelCombo.model);
+        }
+        return; // No available API keys
+      }
+      
+      let currentModel = apiModelCombo?.model || styleMemory.selectedModel || 'auto';
       let apiKey = currentKeySlot.key;
       
       let metadata;
@@ -417,10 +458,14 @@ function App() {
           metadata = await geminiService.generateMetadata(apiKey, payload, currentProfile, styleMemory, false, currentModel);
           updateKeySlotTiming(currentKeySlot.id);
           
-          // Update working combination
-          if (!workingApiModel || workingApiModel.apiKeyId !== currentKeySlot.id || workingApiModel.model !== currentModel) {
-            setWorkingApiModel({ apiKeyId: currentKeySlot.id, model: currentModel });
-          }
+          // Add to working combinations if not already there
+          setWorkingApiModels(prev => {
+            const exists = prev.some(w => w.apiKeyId === currentKeySlot.id && w.model === currentModel);
+            if (!exists) {
+              return [...prev, { apiKeyId: currentKeySlot.id, model: currentModel, inUse: true }];
+            }
+            return prev;
+          });
           
           // Add delay after successful request to respect rate limits
           await new Promise(resolve => setTimeout(resolve, MIN_SAFE_INTERVAL_MS));
@@ -469,13 +514,38 @@ function App() {
                 continue;
               }
               
-              // All APIs exhausted
-              setAllApisExhausted(true);
-              setWorkingApiModel(null);
+              // All APIs exhausted for this file
+              // Remove this combination from working list
+              if (apiModelCombo) {
+                setWorkingApiModels(prev => prev.filter(w => 
+                  !(w.apiKeyId === currentKeySlot.id && w.model === currentModel)
+                ));
+              }
+              
+              // Check if any working combinations remain
+              setWorkingApiModels(prev => {
+                if (prev.length === 0) {
+                  setAllApisExhausted(true);
+                }
+                return prev;
+              });
+              
               throw new QuotaExceededInternal();
             } else {
-              setAllApisExhausted(true);
-              setWorkingApiModel(null);
+              // Remove this combination from working list
+              if (apiModelCombo) {
+                setWorkingApiModels(prev => prev.filter(w => 
+                  !(w.apiKeyId === currentKeySlot.id && w.model === currentModel)
+                ));
+              }
+              
+              setWorkingApiModels(prev => {
+                if (prev.length === 0) {
+                  setAllApisExhausted(true);
+                }
+                return prev;
+              });
+              
               throw new QuotaExceededInternal();
             }
           } else {
@@ -614,15 +684,25 @@ function App() {
     } finally {
       activeProcessingIds.current.delete(item.id);
       setProcessingCount(p => Math.max(0, p - 1));
+      
+      // Release API+model combination
+      if (apiModelCombo) {
+        releaseApiModel(apiModelCombo.apiKeyId, apiModelCombo.model);
+      }
     }
-  }, [currentProfile, styleMemory, getNextAvailableKeySlot, updateKeySlotTiming, workingApiModel, apiKeys]);
+  }, [currentProfile, styleMemory, getNextAvailableKeySlot, updateKeySlotTiming, apiKeys, getNextAvailableApiModel, releaseApiModel]);
 
-  // Test all API+model combinations to find working ones
-  const testAllApiModelCombinations = useCallback(async () => {
+  // Test all API+model combinations to find working ones (runs in background)
+  const testAllApiModelCombinations = useCallback(async (background: boolean = false) => {
     if (apiKeys.length === 0) return;
     
-    setToast({ message: "Testing API keys and models...", type: "success" });
+    if (!background) {
+      setToast({ message: "Testing API keys and models...", type: "success" });
+      setIsTestingApis(true);
+    }
+    
     const results = new Map<string, { apiKeyId: string; model: string; works: boolean }>();
+    const newWorkingCombinations: Array<{ apiKeyId: string; model: string; inUse: boolean }> = [];
     
     // Get available models for first API key (they should be similar across keys)
     let availableModels: string[] = [];
@@ -634,39 +714,79 @@ function App() {
       availableModels = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
     }
     
-    // Test each API key with each model
+    // Test each API key with each model in parallel batches
+    const testPromises: Promise<void>[] = [];
+    
     for (const apiKey of apiKeys) {
       for (const model of availableModels) {
         const key = `${apiKey.id}:${model}`;
-        try {
-          const works = await geminiService.testApiModelCombination(apiKey.key, model);
-          results.set(key, { apiKeyId: apiKey.id, model, works });
-          if (works && !workingApiModel) {
-            // Found first working combination
-            setWorkingApiModel({ apiKeyId: apiKey.id, model });
-            console.log(`Found working combination: ${apiKey.label} + ${model}`);
-            break; // Use this for now
+        // Skip if already tested and working
+        const existing = apiModelTestResults.get(key);
+        if (existing?.works) {
+          // Check if this combination is already in workingApiModels
+          const alreadyAdded = newWorkingCombinations.some(w => w.apiKeyId === apiKey.id && w.model === model);
+          if (!alreadyAdded) {
+            newWorkingCombinations.push({ apiKeyId: apiKey.id, model, inUse: false });
           }
-        } catch (e) {
-          results.set(key, { apiKeyId: apiKey.id, model, works: false });
+          continue;
         }
+        
+        // Test in parallel
+        testPromises.push(
+          geminiService.testApiModelCombination(apiKey.key, model)
+            .then(works => {
+              results.set(key, { apiKeyId: apiKey.id, model, works });
+              if (works) {
+                // Check if this combination is already in workingApiModels
+                const alreadyAdded = newWorkingCombinations.some(w => w.apiKeyId === apiKey.id && w.model === model);
+                if (!alreadyAdded) {
+                  newWorkingCombinations.push({ apiKeyId: apiKey.id, model, inUse: false });
+                  console.log(`Found working combination: ${apiKey.label} + ${model}`);
+                }
+              }
+            })
+            .catch(() => {
+              results.set(key, { apiKeyId: apiKey.id, model, works: false });
+            })
+        );
       }
-      if (workingApiModel) break; // Found working combination, stop testing
     }
+    
+    // Wait for all tests to complete
+    await Promise.all(testPromises);
+    
+    // Merge with existing working combinations (preserve inUse status)
+    setWorkingApiModels(prev => {
+      const merged = [...prev];
+      newWorkingCombinations.forEach(newCombo => {
+        const exists = merged.some(w => w.apiKeyId === newCombo.apiKeyId && w.model === newCombo.model);
+        if (!exists) {
+          merged.push(newCombo);
+        }
+      });
+      return merged;
+    });
     
     setApiModelTestResults(results);
+    setIsTestingApis(false);
     
-    if (!workingApiModel) {
+    const currentWorkingCount = workingApiModels.length + newWorkingCombinations.length;
+    if (currentWorkingCount === 0) {
       setAllApisExhausted(true);
-      setToast({ 
-        message: "All API keys are rate-limited. Please wait or reset quotas.", 
-        type: "error" 
-      });
+      if (!background) {
+        setToast({ 
+          message: "All API keys are rate-limited. Please wait or reset quotas.", 
+          type: "error" 
+        });
+      }
     } else {
       setAllApisExhausted(false);
-      setToast({ message: `Using ${apiKeys.find(k => k.id === workingApiModel.apiKeyId)?.label} with ${workingApiModel.model}`, type: "success" });
+      if (!background && newWorkingCombinations.length > 0) {
+        const count = newWorkingCombinations.length;
+        setToast({ message: `Found ${count} working API+model combination${count > 1 ? 's' : ''}. Processing in parallel...`, type: "success" });
+      }
     }
-  }, [apiKeys, workingApiModel]);
+  }, [apiKeys, apiModelTestResults, workingApiModels]);
 
   const handleSelectFolder = async () => {
     try {
@@ -967,7 +1087,7 @@ function App() {
     }, 1000);
 
     return () => clearInterval(tick);
-  }, [files, isQueueActive, processingCount, apiKeys, processFile]);
+  }, [files, isQueueActive, processingCount, apiKeys, processFile, allApisExhausted, workingApiModels, isTestingApis, testAllApiModelCombinations]);
 
   const handleGenerateVariant = async (id: string) => {
     const item = files.find(f => f.id === id);
