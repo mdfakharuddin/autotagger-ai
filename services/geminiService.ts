@@ -86,19 +86,30 @@ export class GeminiService {
       if (response.ok) {
         const data = await response.json();
         const models = (data.models || [])
-          .map((m: any) => m.name?.replace('models/', '') || m.name)
+          .filter((m: any) => {
+            // Only include models that support generateContent
+            const supportedMethods = m.supportedGenerationMethods || [];
+            return supportedMethods.includes('generateContent');
+          })
+          .map((m: any) => {
+            // Extract model name, removing 'models/' prefix if present
+            const name = m.name?.replace(/^models\//, '') || m.name;
+            return name;
+          })
           .filter(Boolean)
-          // Filter out invalid/non-existent models
+          // Filter to only Gemini models
           .filter((name: string) => {
-            // Only allow known valid model patterns
-            return name.includes('gemini-1.5') || 
-                   name.includes('gemini-pro') || 
-                   name.includes('gemini-1.0');
-            // Explicitly exclude invalid models like gemini-2.5-flash
+            return name.includes('gemini');
           });
+        
+        console.log('Available models for API key:', models);
+        
         // Cache the results
         this.modelCache.set(cacheKey, { models, timestamp: now });
         return models;
+      } else {
+        const errorData = await response.json().catch(() => ({}));
+        console.error('Failed to list models:', response.status, errorData);
       }
     } catch (e) {
       console.warn('Failed to list models:', e);
@@ -119,9 +130,16 @@ export class GeminiService {
     try {
       availableModels = await this.listAvailableModels(trimmedKey);
     } catch (e) {
-      // If listing fails, use fallback models
+      console.warn('Failed to list models during key test:', e);
     }
-    const modelsToTry = availableModels.length > 0 ? availableModels : AVAILABLE_MODELS;
+    
+    // If no models are available, the API key likely doesn't have access
+    if (availableModels.length === 0) {
+      console.warn('No models available for this API key');
+      return false;
+    }
+    
+    const modelsToTry = availableModels;
 
     // Try models in order until one works using REST API
     for (const model of modelsToTry) {
@@ -256,19 +274,29 @@ Generate comprehensive metadata that maximizes discoverability while maintaining
     try {
       availableModels = await this.listAvailableModels(trimmedKey);
     } catch (e) {
-      // If listing fails, use fallback models
+      console.warn('Failed to list available models:', e);
+    }
+    
+    // If no models are available from the API, we can't proceed
+    if (availableModels.length === 0) {
+      throw new Error('No models available for this API key. Please check that your API key has access to Gemini models in Google Cloud Console.');
     }
     
     // If user has selected a specific model (not 'auto'), prioritize it
     let modelsToTry: string[] = [];
     if (preferredModel && preferredModel !== 'auto') {
-      // User selected a specific model - try it first, then fallback
-      modelsToTry = [preferredModel, ...(availableModels.length > 0 ? availableModels : AVAILABLE_MODELS)];
-      // Remove duplicates
-      modelsToTry = [...new Set(modelsToTry)];
+      // Check if the preferred model is in the available models list
+      const preferredModelName = preferredModel.replace(/^models\//, '');
+      if (availableModels.includes(preferredModelName)) {
+        modelsToTry = [preferredModelName];
+      } else {
+        // Preferred model not available, use available models
+        console.warn(`Preferred model ${preferredModelName} not available. Using available models instead.`);
+        modelsToTry = availableModels;
+      }
     } else {
-      // Auto mode - use available models or fallback
-      modelsToTry = availableModels.length > 0 ? availableModels : AVAILABLE_MODELS;
+      // Auto mode - use available models
+      modelsToTry = availableModels;
     }
     
     for (const model of modelsToTry) {
