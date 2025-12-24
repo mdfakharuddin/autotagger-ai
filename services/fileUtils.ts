@@ -215,7 +215,14 @@ export const downloadCsv = (files: FileItem[], preset: PlatformPreset = Platform
 export const downloadAllFiles = async (files: FileItem[]) => {
   if (typeof window === 'undefined') return;
   const zip = new JSZip();
-  files.forEach(item => zip.file(item.newFilename || item.file.name, item.file));
+  
+  for (const item of files) {
+    if (item.file) {
+      const filename = item.newFilename || item.fileName || item.file.name;
+      zip.file(filename, item.file);
+    }
+  }
+  
   const content = await zip.generateAsync({ type: "blob" });
   const url = URL.createObjectURL(content);
   const a = document.createElement('a');

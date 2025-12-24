@@ -8,6 +8,7 @@ interface SettingsModalProps {
   apiKeys: ApiKeyRecord[];
   onAddKey: (key: string, label: string) => void;
   onRemoveKey: (id: string) => void;
+  onResetQuota?: (id: string) => void;
   customProfilePrompts: Record<GenerationProfile, string>;
   onUpdateProfilePrompt: (profile: GenerationProfile, prompt: string) => void;
 }
@@ -18,6 +19,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
   apiKeys,
   onAddKey,
   onRemoveKey,
+  onResetQuota,
   customProfilePrompts,
   onUpdateProfilePrompt
 }) => {
@@ -138,22 +140,49 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                 <div className="space-y-3">
                   <h4 className="text-xs font-bold uppercase tracking-widest text-slate-400 ml-1">Manage Keys</h4>
                   <div className="divide-y divide-slate-100 dark:divide-slate-800 border border-slate-100 dark:border-slate-800 rounded-2xl overflow-hidden">
-                    {apiKeys.map(k => (
-                      <div key={k.id} className="flex items-center justify-between p-4 bg-white dark:bg-slate-900 group">
-                        <div className="flex flex-col">
-                          <span className="text-sm font-medium text-slate-900 dark:text-slate-100">{k.label}</span>
-                          <span className="text-xs font-mono text-slate-400">••••{k.key.slice(-4)}</span>
+                    {apiKeys.map(k => {
+                      const used = k.requestCount || 0;
+                      const limit = k.requestsPerMinute || 50;
+                      const hasUsage = used > 0;
+                      
+                      return (
+                        <div key={k.id} className="flex items-center justify-between p-4 bg-white dark:bg-slate-900 group">
+                          <div className="flex flex-col flex-1">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-sm font-medium text-slate-900 dark:text-slate-100">{k.label}</span>
+                              {hasUsage && (
+                                <span className="text-xs text-slate-500">
+                                  ({used}/{limit} requests)
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-xs font-mono text-slate-400">••••{k.key.slice(-4)}</span>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {hasUsage && onResetQuota && (
+                              <button 
+                                onClick={() => onResetQuota(k.id)} 
+                                className="p-2 text-slate-400 hover:text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 rounded-full transition-all"
+                                title="Reset quota"
+                              >
+                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                </svg>
+                              </button>
+                            )}
+                            <button 
+                              onClick={() => onRemoveKey(k.id)} 
+                              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-full transition-all"
+                              title="Remove key"
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          </div>
                         </div>
-                        <button 
-                          onClick={() => onRemoveKey(k.id)} 
-                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-900/20 rounded-full transition-all"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                          </svg>
-                        </button>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               )}

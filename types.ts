@@ -38,6 +38,10 @@ export interface ApiKeyRecord {
   requestCount?: number;
   quotaResetAt?: number;
   requestsPerMinute?: number;
+  // Daily quota tracking
+  dailyRequestCount?: number;
+  dailyQuotaResetAt?: number;
+  requestsPerDay?: number;
 }
 
 export interface KeywordScore {
@@ -77,7 +81,10 @@ export interface StyleMemory {
 
 export interface FileItem {
   id: string;
-  file: File;
+  file?: File; // Optional when using file system handles
+  fileHandle?: any; // FileSystemFileHandle when using folder access
+  fileName: string; // Original filename
+  filePath?: string; // Path in folder structure
   previewUrl: string;
   status: ProcessingStatus;
   metadata: Metadata;
@@ -86,4 +93,5 @@ export interface FileItem {
   base64Data?: string;
   base64Frames?: string[];
   newFilename?: string;
+  isFromFileSystem?: boolean; // Flag to indicate if using file system API
 }

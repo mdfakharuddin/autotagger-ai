@@ -130,7 +130,13 @@ export class GeminiService {
       };
     } catch (e: any) {
       const errMsg = e.message || '';
-      if (errMsg.includes('429') || errMsg.toLowerCase().includes('quota')) {
+      const statusCode = e.status || e.statusCode || '';
+      // Check for 429 rate limit errors
+      if (statusCode === 429 || 
+          errMsg.includes('429') || 
+          errMsg.toLowerCase().includes('quota') || 
+          errMsg.toLowerCase().includes('rate limit') ||
+          errMsg.toLowerCase().includes('too many requests')) {
         throw new QuotaExceededInternal();
       }
       throw e;

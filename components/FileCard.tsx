@@ -35,7 +35,7 @@ const FileCard: React.FC<FileCardProps> = ({ item, onRemove, onClick, isSelected
       </div>
 
       {/* Visual Component */}
-      <div className="relative aspect-square w-full bg-slate-50 dark:bg-slate-950 overflow-hidden flex items-center justify-center">
+      <div className="relative aspect-[4/3] w-full bg-slate-50 dark:bg-slate-950 overflow-hidden flex items-center justify-center">
         {item.previewUrl ? (
           <img src={item.previewUrl} alt="" className={`w-full h-full object-cover transition-transform duration-700 group-hover:scale-105 ${item.status === ProcessingStatus.PROCESSING ? 'opacity-30 grayscale' : 'opacity-100'}`} />
         ) : (
@@ -43,7 +43,7 @@ const FileCard: React.FC<FileCardProps> = ({ item, onRemove, onClick, isSelected
              <div className="w-10 h-10 bg-slate-200 dark:bg-slate-800 rounded-full flex items-center justify-center text-slate-400">
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z" /></svg>
              </div>
-             <div className="text-[10px] font-mono text-slate-400 break-all truncate w-full">{item.file.name}</div>
+             <div className="text-[10px] font-mono text-slate-400 break-all truncate w-full">{item.fileName || (item.file ? item.file.name : 'Unknown')}</div>
           </div>
         )}
         
@@ -70,7 +70,7 @@ const FileCard: React.FC<FileCardProps> = ({ item, onRemove, onClick, isSelected
            </p>
         </div>
         <h4 className="text-xs font-medium text-slate-700 dark:text-slate-200 truncate leading-tight">
-          {item.metadata.title || item.file.name}
+          {item.metadata.title || item.fileName || (item.file ? item.file.name : 'Unknown')}
         </h4>
       </div>
     </div>

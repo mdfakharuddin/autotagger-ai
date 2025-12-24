@@ -10,8 +10,11 @@ import ApiQuotaStatus from './components/ApiQuotaStatus';
 import { FileItem, ProcessingStatus, ApiKeyRecord, PlatformPreset, GenerationProfile, StyleMemory } from './types';
 import { generateId, readFileAsBase64, getVideoFrames, downloadCsv, generateFilename, downloadAllFiles, calculateReadinessScore } from './services/fileUtils';
 import { geminiService, QuotaExceededInternal } from './services/geminiService';
+import { fileSystemService, FileSystemDirectoryHandle, FileSystemFileHandle } from './services/fileSystemService';
 
-const MIN_SAFE_INTERVAL_MS = 4000; 
+const MIN_SAFE_INTERVAL_MS = 1200; // 1.2 seconds = ~50 requests per minute (safe limit)
+const REQUESTS_PER_MINUTE = 50; // Conservative limit to avoid 429 errors
+const REQUESTS_PER_DAY = 1500; // Free tier daily limit (conservative estimate) 
 
 function App() {
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -33,9 +36,11 @@ function App() {
   });
   const [uploadQueue, setUploadQueue] = useState<File[]>([]);
   const [isProcessingUpload, setIsProcessingUpload] = useState(false);
+  const [selectedFolder, setSelectedFolder] = useState<FileSystemDirectoryHandle | null>(null);
+  const [folderName, setFolderName] = useState<string | null>(null);
 
   const activeProcessingIds = useRef<Set<string>>(new Set());
-  const GEMINI_FREE_TIER_LIMIT = 60; // 60 requests per minute for free tier
+  const GEMINI_FREE_TIER_LIMIT = REQUESTS_PER_MINUTE; // Conservative limit to avoid 429 errors
 
   useEffect(() => {
     const mem = localStorage.getItem('autotagger_style_mem_v4');
@@ -45,16 +50,37 @@ function App() {
     if (keys) {
       const parsedKeys: ApiKeyRecord[] = JSON.parse(keys);
       const now = Date.now();
-      setApiKeys(parsedKeys.map(k => ({ 
-        ...k, 
-        status: 'active', 
-        cooldownUntil: 0, 
-        lastUsedAt: 0, 
-        nextAllowedAt: 0,
-        requestCount: k.requestCount || 0,
-        quotaResetAt: k.quotaResetAt || (now + 60000), // Reset after 1 minute
-        requestsPerMinute: k.requestsPerMinute || GEMINI_FREE_TIER_LIMIT
-      })));
+      setApiKeys(parsedKeys.map(k => {
+        // Reset quota if window expired
+        const quotaResetAt = k.quotaResetAt && k.quotaResetAt > now 
+          ? k.quotaResetAt 
+          : (now + 60000);
+        const requestCount = (k.quotaResetAt && k.quotaResetAt > now) 
+          ? (k.requestCount || 0) 
+          : 0; // Reset count if window expired
+        
+        // Reset daily quota if window expired (24 hours)
+        const dailyQuotaResetAt = k.dailyQuotaResetAt && k.dailyQuotaResetAt > now
+          ? k.dailyQuotaResetAt
+          : (now + 86400000); // 24 hours
+        const dailyRequestCount = (k.dailyQuotaResetAt && k.dailyQuotaResetAt > now)
+          ? (k.dailyRequestCount || 0)
+          : 0; // Reset daily count if window expired
+        
+        return { 
+          ...k, 
+          status: 'active', 
+          cooldownUntil: 0, 
+          lastUsedAt: 0, 
+          nextAllowedAt: 0,
+          requestCount,
+          quotaResetAt,
+          requestsPerMinute: k.requestsPerMinute || REQUESTS_PER_MINUTE,
+          dailyRequestCount,
+          dailyQuotaResetAt,
+          requestsPerDay: k.requestsPerDay || REQUESTS_PER_DAY
+        };
+      }));
     }
   }, []);
 
@@ -77,27 +103,106 @@ function App() {
       nextAllowedAt: 0,
       requestCount: 0,
       quotaResetAt: now + 60000,
-      requestsPerMinute: GEMINI_FREE_TIER_LIMIT
+      requestsPerMinute: GEMINI_FREE_TIER_LIMIT,
+      dailyRequestCount: 0,
+      dailyQuotaResetAt: now + 86400000, // 24 hours
+      requestsPerDay: REQUESTS_PER_DAY
     };
     const newKeys = [...apiKeys, newKeyRecord];
     setApiKeys(newKeys);
-    localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(newKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute}) => ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute}))));
+    localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(
+      newKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute, dailyRequestCount, dailyQuotaResetAt, requestsPerDay}) => 
+        ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute, dailyRequestCount, dailyQuotaResetAt, requestsPerDay})
+      )
+    ));
   };
 
   const handleRemoveKey = (id: string) => {
     const newKeys = apiKeys.filter(k => k.id !== id);
     setApiKeys(newKeys);
     localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(
-      newKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute}) => 
-        ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute})
+      newKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute, dailyRequestCount, dailyQuotaResetAt, requestsPerDay}) => 
+        ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute, dailyRequestCount, dailyQuotaResetAt, requestsPerDay})
       )
     ));
   };
 
+  const handleResetQuota = (id: string) => {
+    const now = Date.now();
+    setApiKeys(prev => prev.map(k => {
+      if (k.id === id) {
+        return {
+          ...k,
+          requestCount: 0,
+          quotaResetAt: now + 60000, // Reset to new 1-minute window
+          status: 'active',
+          cooldownUntil: 0,
+          nextAllowedAt: now,
+          dailyRequestCount: 0, // Also reset daily quota
+          dailyQuotaResetAt: now + 86400000 // Reset daily window
+        };
+      }
+      return k;
+    }));
+    
+    // Persist updated keys
+    setApiKeys(currentKeys => {
+      localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(
+        currentKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute, dailyRequestCount, dailyQuotaResetAt, requestsPerDay}) => 
+          ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute, dailyRequestCount, dailyQuotaResetAt, requestsPerDay})
+        )
+      ));
+      return currentKeys;
+    });
+    
+    setToast({ message: "Quota reset successfully", type: "success" });
+  };
+
+  // Calculate total daily quota remaining across all API keys
+  const getTotalDailyQuotaRemaining = useCallback(() => {
+    const now = Date.now();
+    let totalUsed = 0;
+    let totalLimit = 0;
+    
+    apiKeys.forEach(k => {
+      const dailyLimit = k.requestsPerDay || REQUESTS_PER_DAY;
+      const dailyUsed = (k.dailyQuotaResetAt && now < k.dailyQuotaResetAt)
+        ? (k.dailyRequestCount || 0)
+        : 0;
+      
+      totalUsed += dailyUsed;
+      totalLimit += dailyLimit;
+    });
+    
+    return {
+      used: totalUsed,
+      limit: totalLimit,
+      remaining: Math.max(0, totalLimit - totalUsed),
+      percentage: totalLimit > 0 ? (totalUsed / totalLimit) * 100 : 0
+    };
+  }, [apiKeys]);
+
   const getNextAvailableKeySlot = useCallback((): ApiKeyRecord | null => {
     const now = Date.now();
     const available = apiKeys
-      .filter(k => now >= (k.nextAllowedAt || 0) && (k.status === 'active' || (k.status === 'cooldown' && k.cooldownUntil! < now)))
+      .filter(k => {
+        // Check timing constraints
+        const timingOk = now >= (k.nextAllowedAt || 0) && (k.status === 'active' || (k.status === 'cooldown' && k.cooldownUntil! < now));
+        if (!timingOk) return false;
+        
+        // Check quota limits - reset if window expired
+        if (k.quotaResetAt && now >= k.quotaResetAt) {
+          // Quota window expired, will be reset on next use
+          return true;
+        }
+        
+        // Check if quota limit reached
+        const requestCount = k.requestCount || 0;
+        const limit = k.requestsPerMinute || REQUESTS_PER_MINUTE;
+        const quotaOk = requestCount < limit;
+        
+        return quotaOk;
+      })
       .sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0));
 
     return available.length > 0 ? available[0] : null;
@@ -123,6 +228,14 @@ function App() {
               quotaResetAt: newQuotaResetAt
             };
           }
+          // Reset daily quota if window expired
+          const dailyQuotaResetAt = k.dailyQuotaResetAt && now < k.dailyQuotaResetAt
+            ? k.dailyQuotaResetAt
+            : (now + 86400000);
+          const dailyRequestCount = (k.dailyQuotaResetAt && now < k.dailyQuotaResetAt)
+            ? (k.dailyRequestCount || 0) + 1
+            : 1;
+          
           return { 
             ...k, 
             status: 'active', 
@@ -130,32 +243,70 @@ function App() {
             lastUsedAt: now, 
             nextAllowedAt: now + MIN_SAFE_INTERVAL_MS,
             requestCount: 1, // Reset to 1 (this request)
-            quotaResetAt: newQuotaResetAt
+            quotaResetAt: newQuotaResetAt,
+            dailyRequestCount,
+            dailyQuotaResetAt
           };
         }
         
         // Update within current quota window
         if (quotaTriggered) {
+          // Update daily quota
+          const dailyQuotaResetAt = k.dailyQuotaResetAt && now < k.dailyQuotaResetAt
+            ? k.dailyQuotaResetAt
+            : (now + 86400000);
+          const newDailyRequestCount = (k.dailyQuotaResetAt && now < k.dailyQuotaResetAt)
+            ? (k.dailyRequestCount || 0) + 1
+            : 1;
+          
           return { 
             ...k, 
             status: 'cooldown', 
             cooldownUntil: now + 60000, 
             lastUsedAt: now, 
             nextAllowedAt: now + 60000,
-            requestCount: (k.requestCount || 0) + 1
+            requestCount: (k.requestCount || 0) + 1,
+            dailyRequestCount: newDailyRequestCount,
+            dailyQuotaResetAt
           };
         }
         
         const newRequestCount = (k.requestCount || 0) + 1;
-        const isNearLimit = newRequestCount >= (k.requestsPerMinute || GEMINI_FREE_TIER_LIMIT) * 0.8;
+        const limit = k.requestsPerMinute || REQUESTS_PER_MINUTE;
+        const isAtLimit = newRequestCount >= limit;
+        
+        // Update daily quota
+        const dailyQuotaResetAt = k.dailyQuotaResetAt && now < k.dailyQuotaResetAt
+          ? k.dailyQuotaResetAt
+          : (now + 86400000);
+        const newDailyRequestCount = (k.dailyQuotaResetAt && now < k.dailyQuotaResetAt)
+          ? (k.dailyRequestCount || 0) + 1
+          : 1;
+        
+        // If at limit, set cooldown until quota resets
+        if (isAtLimit) {
+          const resetTime = k.quotaResetAt || (now + 60000);
+          return { 
+            ...k, 
+            status: 'cooldown', 
+            cooldownUntil: resetTime, 
+            lastUsedAt: now, 
+            nextAllowedAt: resetTime,
+            requestCount: newRequestCount,
+            dailyRequestCount: newDailyRequestCount,
+            dailyQuotaResetAt
+          };
+        }
         
         return { 
           ...k, 
-          status: isNearLimit ? 'cooldown' : 'active', 
+          status: 'active', 
           cooldownUntil: 0, 
           lastUsedAt: now, 
           nextAllowedAt: now + MIN_SAFE_INTERVAL_MS,
-          requestCount: newRequestCount
+          requestCount: newRequestCount,
+          dailyRequestCount: newDailyRequestCount,
+          dailyQuotaResetAt
         };
       }
       return k;
@@ -184,18 +335,102 @@ function App() {
       setProcessingCount(p => p + 1);
       setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.PROCESSING } : f));
 
-      const isVideo = item.file.type.startsWith('video/');
-      const payload = isVideo 
-        ? { frames: item.base64Frames, mimeType: 'image/jpeg' }
-        : { base64: await readFileAsBase64(item.file), mimeType: item.file.type };
+      // Get file for processing (either from handle or existing file object)
+      let processingFile: File;
+      if (item.isFromFileSystem && item.fileHandle) {
+        processingFile = await fileSystemService.readFileForProcessing(item.fileHandle);
+        // Cache the file object for future use
+        setFiles(prev => prev.map(f => f.id === item.id ? { ...f, file: processingFile } : f));
+      } else if (item.file) {
+        processingFile = item.file;
+      } else {
+        throw new Error('No file available for processing');
+      }
 
-      const apiKey = keySlot.key;
+      const isVideo = processingFile.type.startsWith('video/');
+      let payload: { base64?: string; frames?: string[]; mimeType: string };
       
-      const metadata = await geminiService.generateMetadata(apiKey, payload, currentProfile, styleMemory);
-      updateKeySlotTiming(keySlot.id);
+      if (isVideo) {
+        // Use existing frames if available, otherwise generate them
+        if (item.base64Frames && item.base64Frames.length > 0) {
+          payload = { frames: item.base64Frames, mimeType: 'image/jpeg' };
+        } else {
+          const { frames } = await getVideoFrames(processingFile);
+          setFiles(prev => prev.map(f => f.id === item.id ? { ...f, base64Frames: frames } : f));
+          payload = { frames, mimeType: 'image/jpeg' };
+        }
+      } else {
+        payload = { base64: await readFileAsBase64(processingFile), mimeType: processingFile.type };
+      }
 
-      const newFilename = generateFilename(metadata.title, item.file.name);
+      let currentKeySlot = keySlot;
+      let apiKey = currentKeySlot.key;
+      
+      let metadata;
+      let retries = 0;
+      const maxRetries = 3;
+      
+      while (retries < maxRetries) {
+        try {
+          metadata = await geminiService.generateMetadata(apiKey, payload, currentProfile, styleMemory);
+          updateKeySlotTiming(currentKeySlot.id);
+          break; // Success, exit retry loop
+        } catch (e: any) {
+          const isRateLimit = e instanceof QuotaExceededInternal || 
+                             (e.message && (e.message.includes('429') || e.message.toLowerCase().includes('quota') || e.message.toLowerCase().includes('rate limit')));
+          
+          if (isRateLimit) {
+            // Rate limited - update timing and retry with backoff
+            updateKeySlotTiming(currentKeySlot.id, true);
+            retries++;
+            if (retries < maxRetries) {
+              // Exponential backoff: 2s, 4s, 8s
+              const backoffMs = Math.min(8000, 2000 * Math.pow(2, retries - 1));
+              await new Promise(resolve => setTimeout(resolve, backoffMs));
+              // Get a new key slot after backoff
+              const newKeySlot = getNextAvailableKeySlot();
+              if (newKeySlot) {
+                currentKeySlot = newKeySlot;
+                apiKey = newKeySlot.key;
+              } else {
+                // No available keys, wait longer
+                await new Promise(resolve => setTimeout(resolve, 10000));
+                const retryKeySlot = getNextAvailableKeySlot();
+                if (retryKeySlot) {
+                  currentKeySlot = retryKeySlot;
+                  apiKey = retryKeySlot.key;
+                } else {
+                  throw new QuotaExceededInternal();
+                }
+              }
+            } else {
+              throw new QuotaExceededInternal();
+            }
+          } else {
+            // Other error, don't retry
+            throw e;
+          }
+        }
+      }
+
+      const originalFilename = item.fileName || (item.file ? item.file.name : 'unknown');
+      const newFilename = generateFilename(metadata.title, originalFilename);
       const readinessScore = calculateReadinessScore(metadata, metadata.rejectionRisks || []);
+      
+      // Save metadata to file system if using folder mode
+      if (item.isFromFileSystem && selectedFolder && item.fileName) {
+        try {
+          await fileSystemService.saveMetadataFile(selectedFolder, item.fileName, {
+            ...metadata,
+            readinessScore,
+            generatedAt: new Date().toISOString(),
+            originalFilename,
+            newFilename
+          });
+        } catch (error) {
+          console.error('Error saving metadata file:', error);
+        }
+      }
       
       setFiles(prev => prev.map(f => f.id === item.id ? { 
         ...f, 
@@ -204,8 +439,11 @@ function App() {
         newFilename 
       } : f));
     } catch (e: any) {
-      if (e instanceof QuotaExceededInternal) {
-        updateKeySlotTiming(keySlot.id, true);
+      const isRateLimit = e instanceof QuotaExceededInternal || 
+                         (e.message && (e.message.includes('429') || e.message.toLowerCase().includes('quota') || e.message.toLowerCase().includes('rate limit')));
+      
+      if (isRateLimit) {
+        // Re-queue the file for later processing
         setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.PENDING } : f));
       } else {
         setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Analysis failed." } : f));
@@ -216,14 +454,83 @@ function App() {
     }
   }, [currentProfile, styleMemory, getNextAvailableKeySlot, updateKeySlotTiming]);
 
+  const handleSelectFolder = async () => {
+    try {
+      const folderHandle = await fileSystemService.selectFolder();
+      if (!folderHandle) return; // User cancelled
+      
+      setSelectedFolder(folderHandle);
+      setFolderName(folderHandle.name);
+      fileSystemService.setDirectory(folderHandle);
+      
+      setIsProcessingUpload(true);
+      
+      // Get all files from folder
+      const folderFiles = await fileSystemService.getFilesFromFolder(folderHandle);
+      
+      // Create file items without loading files into memory
+      const newFiles: FileItem[] = folderFiles.map(({ handle, name, path }) => ({
+        id: generateId(),
+        fileHandle: handle,
+        fileName: name,
+        filePath: path,
+        previewUrl: '', // Will be loaded on-demand
+        status: ProcessingStatus.PENDING,
+        metadata: { title: '', description: '', keywords: [], category: '' },
+        isFromFileSystem: true
+      }));
+      
+      setFiles(newFiles);
+      
+      // Load previews sequentially (on-demand, not all at once)
+      for (const item of newFiles) {
+        try {
+          const { file, previewUrl } = await fileSystemService.readFileForPreview(item.fileHandle);
+          if (file.type.startsWith('image/')) {
+            setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, file } : f));
+          } else if (file.type.startsWith('video/')) {
+            try {
+              const { previewUrl: vidPreview, frames } = await getVideoFrames(file);
+              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl: vidPreview, base64Frames: frames, file } : f));
+            } catch (err) {
+              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
+            }
+          }
+        } catch (err) {
+          console.error('Error loading preview:', err);
+        }
+        
+        // Small delay to prevent browser overload
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
+      
+      setIsProcessingUpload(false);
+      setToast({ message: `Loaded ${newFiles.length} files from folder`, type: "success" });
+    } catch (error: any) {
+      setIsProcessingUpload(false);
+      if (error.message?.includes('not supported')) {
+        setToast({ message: "Folder access is only available in Chrome, Edge, or Opera browsers", type: "error" });
+      } else {
+        setToast({ message: "Error accessing folder", type: "error" });
+      }
+    }
+  };
+
   const handleFilesSelected = async (selectedFiles: File[]) => {
+    // Clear folder mode when uploading files
+    setSelectedFolder(null);
+    setFolderName(null);
+    fileSystemService.setDirectory(null);
+    
     // Add all files to queue immediately (basic info only)
     const newFiles: FileItem[] = selectedFiles.map(f => ({
       id: generateId(),
       file: f,
+      fileName: f.name,
       previewUrl: '', // Will be set sequentially
       status: ProcessingStatus.PENDING,
-      metadata: { title: '', description: '', keywords: [], category: '' }
+      metadata: { title: '', description: '', keywords: [], category: '' },
+      isFromFileSystem: false
     }));
 
     setFiles(prev => [...prev, ...newFiles]);
@@ -234,12 +541,12 @@ function App() {
       
       try {
         // Generate preview for images immediately (lightweight)
-        if (item.file.type.startsWith('image/')) {
+        if (item.file && item.file.type.startsWith('image/')) {
           const previewUrl = URL.createObjectURL(item.file);
           setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl } : f));
         } 
         // Process videos sequentially (heavy operation)
-        else if (item.file.type.startsWith('video/')) {
+        else if (item.file && item.file.type.startsWith('video/')) {
           try {
             const { previewUrl, frames } = await getVideoFrames(item.file);
             setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, base64Frames: frames } : f));
@@ -262,13 +569,25 @@ function App() {
     if (!isQueueActive) return;
     
     const tick = setInterval(() => {
+      const now = Date.now();
       const activeKeys = apiKeys.filter(k => {
-        const now = Date.now();
-        return now >= (k.nextAllowedAt || 0) && (k.status === 'active' || (k.status === 'cooldown' && k.cooldownUntil! < now));
+        const timingOk = now >= (k.nextAllowedAt || 0) && (k.status === 'active' || (k.status === 'cooldown' && k.cooldownUntil! < now));
+        if (!timingOk) return false;
+        
+        // Check quota limits
+        if (k.quotaResetAt && now >= k.quotaResetAt) {
+          return true; // Quota window expired, will reset
+        }
+        
+        const requestCount = k.requestCount || 0;
+        const limit = k.requestsPerMinute || REQUESTS_PER_MINUTE;
+        return requestCount < limit;
       });
       
-      // Process files in parallel based on available API keys (reverted to parallel)
-      if (activeKeys.length > 0 && processingCount < apiKeys.length) {
+      // Process files in parallel based on available API keys, but respect rate limits
+      // Limit concurrent processing to number of available keys
+      const maxConcurrent = Math.min(activeKeys.length, apiKeys.length);
+      if (activeKeys.length > 0 && processingCount < maxConcurrent) {
         const pending = files.filter(f => f.status === ProcessingStatus.PENDING);
         const nextFile = pending.find(f => !activeProcessingIds.current.has(f.id));
         if (nextFile) {
@@ -342,22 +661,36 @@ function App() {
         }}
         onStopQueue={() => setIsQueueActive(false)}
         onExport={p => downloadCsv(files, p)}
-        onDownloadFiles={() => downloadAllFiles(files)}
+        onDownloadFiles={async () => {
+          if (selectedFolder) {
+            // In folder mode, just export CSV (files are already local)
+            setToast({ message: "Files are already in your local folder. Export CSV to get metadata.", type: "success" });
+          } else {
+            downloadAllFiles(files);
+          }
+        }}
         onOpenSettings={() => setIsSettingsOpen(true)}
         onExportToSheets={() => {}} 
-        onSelectDirectory={() => {}}
-        directoryName={null}
+        onSelectDirectory={handleSelectFolder}
+        directoryName={folderName}
         isSyncingToSheets={false}
         activeKeysCount={apiKeys.length}
-        isDirectoryPickerSupported={false}
+        isDirectoryPickerSupported={typeof window !== 'undefined' && 'showDirectoryPicker' in window}
         apiKeys={apiKeys}
         isProcessingUpload={isProcessingUpload}
+        onResetQuota={handleResetQuota}
+        totalDailyQuota={getTotalDailyQuotaRemaining()}
       />
 
       <main className="flex-1 px-4 lg:px-12 py-8 max-w-[1920px] mx-auto w-full">
         {files.length === 0 ? (
           <div className="flex flex-col items-center justify-center min-h-[60vh] animate-fade-in">
-            <FileUpload onFilesSelected={handleFilesSelected} />
+            <FileUpload 
+              onFilesSelected={handleFilesSelected} 
+              onFolderSelected={handleSelectFolder}
+              isFolderMode={!!selectedFolder}
+              folderName={folderName}
+            />
             <div className="mt-12 text-center max-w-xl text-slate-500">
                <p className="text-lg font-medium mb-4">Start your stock workflow.</p>
                <div className="grid grid-cols-3 gap-8 opacity-60">
@@ -511,6 +844,7 @@ function App() {
         apiKeys={apiKeys}
         onAddKey={handleAddKey}
         onRemoveKey={handleRemoveKey}
+        onResetQuota={handleResetQuota}
         customProfilePrompts={styleMemory.customProfilePrompts || {} as any}
         onUpdateProfilePrompt={(profile, prompt) => {
            const newPrompts = { ...styleMemory.customProfilePrompts, [profile]: prompt };

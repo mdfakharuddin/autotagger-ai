@@ -21,6 +21,8 @@ interface HeaderProps {
   isDirectoryPickerSupported: boolean;
   apiKeys: ApiKeyRecord[];
   isProcessingUpload: boolean;
+  onResetQuota: (id: string) => void;
+  totalDailyQuota: { used: number; limit: number; remaining: number; percentage: number };
 }
 
 const Header: React.FC<HeaderProps> = ({ 
@@ -34,6 +36,8 @@ const Header: React.FC<HeaderProps> = ({
   onOpenSettings,
   apiKeys,
   isProcessingUpload,
+  onResetQuota,
+  totalDailyQuota,
 }) => {
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const allCompleted = totalFiles > 0 && completedFiles === totalFiles;
@@ -122,7 +126,37 @@ const Header: React.FC<HeaderProps> = ({
       {/* API Quota Status Bar */}
       {apiKeys.length > 0 && (
         <div className="px-6 py-2 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800">
-          <ApiQuotaStatus apiKeys={apiKeys} />
+          {/* Total Daily Quota Summary */}
+          <div className="mb-3 pb-3 border-b border-slate-200 dark:border-slate-700">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="flex flex-col">
+                  <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Daily Quota</span>
+                  <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                    {totalDailyQuota.remaining.toLocaleString()} / {totalDailyQuota.limit.toLocaleString()} remaining
+                  </span>
+                </div>
+              </div>
+              <div className="flex items-center gap-3">
+                <div className="w-32 h-2 bg-slate-200 dark:bg-slate-700 rounded-full overflow-hidden">
+                  <div 
+                    className={`h-full transition-all duration-300 ${
+                      totalDailyQuota.percentage >= 90 ? 'bg-rose-500' :
+                      totalDailyQuota.percentage >= 75 ? 'bg-amber-500' :
+                      'bg-emerald-500'
+                    }`}
+                    style={{ width: `${Math.min(100, totalDailyQuota.percentage)}%` }}
+                  />
+                </div>
+                <span className="text-xs font-medium text-slate-600 dark:text-slate-400 min-w-[50px] text-right">
+                  {totalDailyQuota.used.toLocaleString()} used
+                </span>
+              </div>
+            </div>
+          </div>
+          
+          {/* Individual API Key Quotas */}
+          <ApiQuotaStatus apiKeys={apiKeys} onResetQuota={onResetQuota} />
         </div>
       )}
       
