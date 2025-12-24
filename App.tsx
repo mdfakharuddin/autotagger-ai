@@ -964,24 +964,15 @@ function App() {
         }, delay);
       };
       
-      // Load previews individually and show them as they load
+      // Load previews one by one to prevent system overload
       // This provides immediate visual feedback as each preview becomes available
       const loadAllPreviews = async () => {
-        // Reduce concurrent limit for large folders to prevent memory issues
-        // Check if we have large files (>50MB) to adjust batch size
-        const hasLargeFiles = newFiles.some(f => {
-          // We can't check file size from handle, so use a conservative limit
-          return true; // Assume some files might be large
-        });
-        const concurrentLimit = hasLargeFiles ? 3 : 5; // Reduce to 3 for safety
-        
-        for (let i = 0; i < newFiles.length; i += concurrentLimit) {
-          const batch = newFiles.slice(i, i + concurrentLimit);
-          // Load batch in parallel - each preview will appear as it loads
-          await Promise.all(batch.map(item => loadPreview(item)));
-          // Longer delay for large folders to prevent browser overload
-          if (i + concurrentLimit < newFiles.length) {
-            await new Promise(resolve => setTimeout(resolve, hasLargeFiles ? 50 : 10));
+        // Load files sequentially, one at a time
+        for (let i = 0; i < newFiles.length; i++) {
+          await loadPreview(newFiles[i]);
+          // Small delay between files to prevent overwhelming the system
+          if (i < newFiles.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 100));
           }
         }
         setToast({ message: `Loaded ${newFiles.length} files with previews`, type: "success" });
