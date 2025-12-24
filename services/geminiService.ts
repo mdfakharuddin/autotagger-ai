@@ -48,12 +48,14 @@ const METADATA_SCHEMA = {
 };
 
 // Models ordered by free tier access (best first)
-// Using v1 API endpoint with correct model names
+// Note: Model names may differ between v1 and v1beta APIs
+// Try listing models first, then fall back to known working names
 const AVAILABLE_MODELS = [
-  'gemini-1.5-flash',        // Most widely available with good free tier
-  'gemini-1.5-flash-latest', // Latest version
-  'gemini-1.5-pro',         // Pro version
+  'gemini-1.5-flash-001',    // Specific version that works with v1
+  'gemini-1.5-pro-001',      // Specific pro version
   'gemini-pro',              // Legacy model
+  'models/gemini-1.5-flash', // Full path format
+  'models/gemini-pro',       // Full path format
 ];
 
 export class GeminiService {
@@ -61,6 +63,22 @@ export class GeminiService {
     // Return the model with best free tier access
     // Currently gemini-1.5-flash-latest has good free tier limits
     return AVAILABLE_MODELS[0];
+  }
+
+  async listAvailableModels(apiKey: string): Promise<string[]> {
+    try {
+      const url = new URL(`${API_BASE_URL}/models`);
+      url.searchParams.set('key', apiKey.trim());
+      
+      const response = await fetch(url.toString());
+      if (response.ok) {
+        const data = await response.json();
+        return (data.models || []).map((m: any) => m.name?.replace('models/', '') || m.name).filter(Boolean);
+      }
+    } catch (e) {
+      console.warn('Failed to list models:', e);
+    }
+    return [];
   }
 
   async testKey(apiKey: string): Promise<boolean> {
@@ -71,12 +89,22 @@ export class GeminiService {
       return false;
     }
 
+    // First, try to list available models
+    let availableModels: string[] = [];
+    try {
+      availableModels = await this.listAvailableModels(trimmedKey);
+    } catch (e) {
+      // If listing fails, use fallback models
+    }
+    const modelsToTry = availableModels.length > 0 ? availableModels : AVAILABLE_MODELS;
+
     // Try models in order until one works using REST API
-    for (const model of AVAILABLE_MODELS) {
+    for (const model of modelsToTry) {
       try {
+        // Remove 'models/' prefix if present
+        const modelName = model.replace(/^models\//, '');
         // Use query parameter for API key (Gemini API requires it this way)
-        // Ensure proper URL encoding
-        const url = new URL(`${API_BASE_URL}/models/${model}:generateContent`);
+        const url = new URL(`${API_BASE_URL}/models/${modelName}:generateContent`);
         url.searchParams.set('key', trimmedKey);
         
         const response = await fetch(url.toString(), {
@@ -116,7 +144,7 @@ export class GeminiService {
         }
 
         // Log the error for debugging
-        console.warn(`Model ${model} failed:`, statusCode, errMsg);
+        console.warn(`Model ${modelName} failed:`, statusCode, errMsg);
         // Try next model
         continue;
       } catch (e: any) {
@@ -172,10 +200,21 @@ export class GeminiService {
     let lastError: any = null;
     const trimmedKey = apiKey.trim();
     
-    for (const model of AVAILABLE_MODELS) {
+    // First, try to get available models for this API key
+    let availableModels: string[] = [];
+    try {
+      availableModels = await this.listAvailableModels(trimmedKey);
+    } catch (e) {
+      // If listing fails, use fallback models
+    }
+    const modelsToTry = availableModels.length > 0 ? availableModels : AVAILABLE_MODELS;
+    
+    for (const model of modelsToTry) {
       try {
+        // Remove 'models/' prefix if present
+        const modelName = model.replace(/^models\//, '');
         // Use URL object to properly construct the query string
-        const url = new URL(`${API_BASE_URL}/models/${model}:generateContent`);
+        const url = new URL(`${API_BASE_URL}/models/${modelName}:generateContent`);
         url.searchParams.set('key', trimmedKey);
         
         const response = await fetch(url.toString(), {
