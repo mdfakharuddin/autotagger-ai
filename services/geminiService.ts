@@ -297,69 +297,76 @@ Generate comprehensive metadata that maximizes discoverability while maintaining
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          const errMsg = errorData.error?.message || errorData.error?.message || '';
+          const errMsg = errorData.error?.message || errorData.error?.message || JSON.stringify(errorData);
           const statusCode = response.status;
           
+          // Log the actual error for debugging
+          console.error(`Gemini API Error [${statusCode}]:`, {
+            model: modelName,
+            message: errMsg,
+            fullError: errorData
+          });
+          
           // Check for fundamental API issues that will affect all models
+          const lowerMsg = errMsg.toLowerCase();
           const isApiKeyIssue = statusCode === 400 && (
-            errMsg.toLowerCase().includes('api key') ||
-            errMsg.toLowerCase().includes('invalid api key') ||
-            errMsg.toLowerCase().includes('api key not valid') ||
-            errMsg.toLowerCase().includes('authentication') ||
-            errMsg.toLowerCase().includes('permission denied')
+            lowerMsg.includes('api key') ||
+            lowerMsg.includes('invalid api key') ||
+            lowerMsg.includes('api key not valid') ||
+            lowerMsg.includes('authentication') ||
+            lowerMsg.includes('permission denied') ||
+            lowerMsg.includes('invalid') && lowerMsg.includes('key')
           );
           
           const isBillingIssue = statusCode === 403 || 
-            errMsg.toLowerCase().includes('billing') ||
-            errMsg.toLowerCase().includes('quota exceeded') ||
-            errMsg.toLowerCase().includes('payment required');
+            lowerMsg.includes('billing') ||
+            lowerMsg.includes('quota exceeded') ||
+            lowerMsg.includes('payment required');
           
           // If it's a fundamental API issue (key, billing), don't try other models
           if (isApiKeyIssue || isBillingIssue) {
             throw new Error(isApiKeyIssue 
-              ? 'Invalid API key. Please check your API key in Settings.' 
+              ? 'Invalid API key. Please check your API key in Settings and ensure it has access to the Generative Language API.' 
               : 'Billing or quota issue. Please check your Google Cloud Console.');
           }
           
           // If it's a rate limit error, try next model
           const isRateLimit = statusCode === 429 || 
             errMsg.includes('429') || 
-            errMsg.toLowerCase().includes('rate limit') ||
-            errMsg.toLowerCase().includes('too many requests');
+            lowerMsg.includes('rate limit') ||
+            lowerMsg.includes('too many requests');
           
-          // 400 Bad Request - could be invalid model OR API key issue
-          // If we've already tried the first model and it's 400, likely all will fail
-          const isInvalidModel = statusCode === 400 && 
-            !isApiKeyIssue && // Not an API key issue
-            (errMsg.toLowerCase().includes('invalid model') ||
-             errMsg.toLowerCase().includes('not found') ||
-             errMsg.toLowerCase().includes('bad request'));
+          // 400 Bad Request - treat as API key issue if it's the first model
+          // Most 400 errors from Gemini API are API key related, not model-specific
+          const modelIndex = modelsToTry.indexOf(model);
+          if (statusCode === 400) {
+            // If first model returns 400, assume it's an API key issue and stop
+            if (modelIndex === 0) {
+              throw new Error(`Invalid API key or request. ${errMsg || 'Please check your API key in Settings and ensure it has access to Gemini models.'}`);
+            }
+            // If subsequent models also return 400, definitely an API key issue
+            throw new Error(`API key issue detected. ${errMsg || 'Please verify your API key in Settings.'}`);
+          }
           
-          // 404 can mean model not found
-          const isModelNotFound = statusCode === 404 || 
-            (errMsg.toLowerCase().includes('not found') && 
-             !errMsg.toLowerCase().includes('api key'));
+          // 404 can mean model not found - try next model only if it's clearly model-specific
+          const isModelNotFound = statusCode === 404 && 
+            !lowerMsg.includes('api key') &&
+            !lowerMsg.includes('permission');
           
-          // If first model fails with 400 and it's not clearly an API key issue, 
-          // and we're in auto mode, try one more model then give up
           if (isRateLimit) {
             lastError = { message: errMsg, status: statusCode, statusCode };
             console.warn(`Model ${modelName} rate limited, trying next...`);
             continue; // Try next model for rate limits
           }
           
-          if (isInvalidModel || isModelNotFound) {
-            // If this is the first model and it's invalid, try one more then stop
-            // If we've tried multiple models and all fail, it's likely a fundamental issue
-            const modelIndex = modelsToTry.indexOf(model);
-            if (modelIndex === 0 && modelsToTry.length > 1) {
-              // First model failed, try one more
+          if (isModelNotFound) {
+            // Only try next model if it's clearly a model not found issue
+            if (modelIndex < modelsToTry.length - 1) {
               lastError = { message: errMsg, status: statusCode, statusCode };
-              console.warn(`Model ${modelName} unavailable, trying next model...`);
+              console.warn(`Model ${modelName} not found, trying next model...`);
               continue;
             } else {
-              // Multiple models failed or last model - likely fundamental issue
-              throw new Error(`All models unavailable. ${errMsg || 'Please check your API key and Google Cloud Console settings.'}`);
+              throw new Error(`Model not available. ${errMsg || 'Please check your API key and Google Cloud Console settings.'}`);
             }
           }
           
