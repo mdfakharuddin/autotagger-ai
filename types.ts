@@ -95,4 +95,6 @@ export interface FileItem {
   base64Frames?: string[];
   newFilename?: string;
   isFromFileSystem?: boolean; // Flag to indicate if using file system API
+  previewRetryCount?: number; // Track retry attempts for preview loading
+  previewLoadFailed?: boolean; // Flag to indicate preview failed to load
 }

@@ -894,27 +894,48 @@ function App() {
       setIsProcessingUpload(false);
       setPreviewLoadProgress({ loaded: 0, total: newFiles.length });
       
-      // Load previews in parallel batches for faster loading
-      const loadPreview = async (item: FileItem) => {
+      // Load previews in parallel batches for faster loading with retry logic
+      const loadPreview = async (item: FileItem, retryCount: number = 0): Promise<void> => {
         try {
           const { file, previewUrl } = await fileSystemService.readFileForPreview(item.fileHandle);
           if (file.type.startsWith('image/')) {
-            setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, file } : f));
+            setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, file, previewRetryCount: 0, previewLoadFailed: false } : f));
             setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
           } else if (file.type.startsWith('video/')) {
             try {
               const { previewUrl: vidPreview, frames } = await getVideoFrames(file);
-              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl: vidPreview, base64Frames: frames, file } : f));
+              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl: vidPreview, base64Frames: frames, file, previewRetryCount: 0, previewLoadFailed: false } : f));
               setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
             } catch (err) {
-              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
-              setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+              // Don't mark as error, just retry
+              console.warn(`Video preview load failed for ${item.fileName} (attempt ${retryCount + 1}):`, err);
+              handlePreviewRetry(item, retryCount);
             }
           }
         } catch (err) {
-          console.error('Error loading preview:', err);
-          setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+          // Don't mark as error, just retry
+          console.warn(`Preview load failed for ${item.fileName} (attempt ${retryCount + 1}):`, err);
+          handlePreviewRetry(item, retryCount);
         }
+      };
+
+      const handlePreviewRetry = (item: FileItem, retryCount: number) => {
+        // Update retry count
+        setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewRetryCount: retryCount + 1, previewLoadFailed: true } : f));
+        setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+        
+        // Limit retries to 10 attempts
+        if (retryCount >= 10) {
+          console.warn(`Max retry attempts reached for file ${item.fileName}`);
+          return;
+        }
+        
+        // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 30000);
+        
+        setTimeout(() => {
+          loadPreview(item, retryCount + 1);
+        }, delay);
       };
       
       // Load previews individually and show them as they load
@@ -1020,8 +1041,33 @@ function App() {
               
               img.onerror = () => {
                 URL.revokeObjectURL(objectUrl);
-                const previewUrl = URL.createObjectURL(item.file);
-                setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl } : f));
+                // Try fallback: direct blob URL
+                try {
+                  const previewUrl = URL.createObjectURL(item.file);
+                  setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, previewRetryCount: 0, previewLoadFailed: false } : f));
+                } catch (fallbackErr) {
+                  // If fallback also fails, schedule retry
+                  console.warn(`Image preview load failed for ${item.file?.name}, will retry...`);
+                  const retryCount = 0;
+                  setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewRetryCount: retryCount + 1, previewLoadFailed: true } : f));
+                  
+                  // Retry after delay
+                  setTimeout(() => {
+                    const retryObjectUrl = URL.createObjectURL(item.file!);
+                    const retryImg = new Image();
+                    retryImg.onload = () => {
+                      URL.revokeObjectURL(retryObjectUrl);
+                      const previewUrl = URL.createObjectURL(item.file!);
+                      setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, previewRetryCount: 0, previewLoadFailed: false } : f));
+                    };
+                    retryImg.onerror = () => {
+                      URL.revokeObjectURL(retryObjectUrl);
+                      const previewUrl = URL.createObjectURL(item.file!);
+                      setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, previewRetryCount: 1, previewLoadFailed: true } : f));
+                    };
+                    retryImg.src = retryObjectUrl;
+                  }, 1000);
+                }
               };
               
               img.src = objectUrl;

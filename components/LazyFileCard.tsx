@@ -22,6 +22,8 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
   const [isLoadingPreview, setIsLoadingPreview] = useState(!item.previewUrl && item.isFromFileSystem);
   const cardRef = useRef<HTMLDivElement>(null);
   const hasLoadedRef = useRef(false);
+  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const retryCountRef = useRef(item.previewRetryCount || 0);
 
   useEffect(() => {
     // If preview already exists, use it
@@ -58,11 +60,17 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
 
     return () => {
       observer.disconnect();
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+      }
     };
   }, [item.id, item.previewUrl, item.isFromFileSystem, item.fileHandle]);
 
-  const loadPreview = async () => {
-    if (!item.fileHandle || hasLoadedRef.current) return;
+  const loadPreview = async (isRetry: boolean = false) => {
+    if (!item.fileHandle) return;
+    
+    // Don't retry if already loaded successfully
+    if (hasLoadedRef.current && previewUrl) return;
     
     setIsLoadingPreview(true);
     try {
@@ -71,22 +79,53 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
       if (file.type.startsWith('image/')) {
         setPreviewUrl(url);
         setIsLoadingPreview(false);
+        hasLoadedRef.current = true;
+        retryCountRef.current = 0; // Reset retry count on success
         onPreviewLoaded?.(item.id, url, file);
       } else if (file.type.startsWith('video/')) {
         try {
           const { previewUrl: vidPreview, frames } = await getVideoFrames(file);
           setPreviewUrl(vidPreview);
           setIsLoadingPreview(false);
+          hasLoadedRef.current = true;
+          retryCountRef.current = 0; // Reset retry count on success
           onPreviewLoaded?.(item.id, vidPreview, file, frames);
         } catch (err) {
           setIsLoadingPreview(false);
-          console.error('Error loading video preview:', err);
+          console.warn(`Video preview load failed (attempt ${retryCountRef.current + 1}):`, err);
+          scheduleRetry();
         }
       }
     } catch (err) {
       setIsLoadingPreview(false);
-      console.error('Error loading preview:', err);
+      console.warn(`Preview load failed (attempt ${retryCountRef.current + 1}):`, err);
+      scheduleRetry();
     }
+  };
+
+  const scheduleRetry = () => {
+    // Clear any existing retry timeout
+    if (retryTimeoutRef.current) {
+      clearTimeout(retryTimeoutRef.current);
+    }
+    
+    // Don't retry if already loaded
+    if (hasLoadedRef.current && previewUrl) return;
+    
+    // Limit retries to 10 attempts
+    if (retryCountRef.current >= 10) {
+      console.warn(`Max retry attempts reached for file ${item.fileName}`);
+      return;
+    }
+    
+    retryCountRef.current += 1;
+    
+    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
+    const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 30000);
+    
+    retryTimeoutRef.current = setTimeout(() => {
+      loadPreview(true);
+    }, delay);
   };
 
   const statusColors = {
