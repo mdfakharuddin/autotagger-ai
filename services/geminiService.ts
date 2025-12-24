@@ -50,7 +50,7 @@ export class GeminiService {
     try {
       const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+        model: 'gemini-1.5-flash-latest',
         contents: { parts: [{ text: 'test' }] },
       });
       // If we get a response, the key is valid
@@ -105,7 +105,7 @@ export class GeminiService {
 
     try {
       const response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
+        model: 'gemini-1.5-flash-latest',
         contents: { parts: promptParts },
         config: {
           responseMimeType: "application/json",

@@ -13,8 +13,8 @@ import { generateId, readFileAsBase64, readFileAsBase64ForAPI, getVideoFrames, d
 import { geminiService, QuotaExceededInternal } from './services/geminiService';
 import { fileSystemService, FileSystemDirectoryHandle, FileSystemFileHandle } from './services/fileSystemService';
 
-const MIN_SAFE_INTERVAL_MS = 1200; // 1.2 seconds = ~50 requests per minute (safe limit)
-const REQUESTS_PER_MINUTE = 50; // Conservative limit to avoid 429 errors
+const MIN_SAFE_INTERVAL_MS = 2000; // 2 seconds = ~30 requests per minute (more conservative)
+const REQUESTS_PER_MINUTE = 30; // More conservative limit to avoid 429 errors
 const REQUESTS_PER_DAY = 1500; // Free tier daily limit (conservative estimate) 
 
 function App() {
@@ -378,6 +378,8 @@ function App() {
         try {
           metadata = await geminiService.generateMetadata(apiKey, payload, currentProfile, styleMemory);
           updateKeySlotTiming(currentKeySlot.id);
+          // Add delay after successful request to respect rate limits
+          await new Promise(resolve => setTimeout(resolve, MIN_SAFE_INTERVAL_MS));
           break; // Success, exit retry loop
         } catch (e: any) {
           const isRateLimit = e instanceof QuotaExceededInternal || 
@@ -627,10 +629,9 @@ function App() {
         return requestCount < limit;
       });
       
-      // Process files in parallel based on available API keys, but respect rate limits
-      // Limit concurrent processing to number of available keys
-      const maxConcurrent = Math.min(activeKeys.length, apiKeys.length);
-      if (activeKeys.length > 0 && processingCount < maxConcurrent) {
+      // Process files one at a time to strictly respect rate limits
+      // Even with multiple keys, process sequentially to avoid 429 errors
+      if (activeKeys.length > 0 && processingCount === 0) {
         const pending = files.filter(f => f.status === ProcessingStatus.PENDING);
         const nextFile = pending.find(f => !activeProcessingIds.current.has(f.id));
         if (nextFile) {
