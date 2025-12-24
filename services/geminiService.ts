@@ -65,6 +65,23 @@ export class GeminiService {
   private modelCache: Map<string, { models: string[]; timestamp: number }> = new Map();
   private readonly CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
+  private extractJsonFromResponse(text: string): string {
+    // Try to extract JSON from markdown code blocks
+    const codeBlockMatch = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    if (codeBlockMatch) {
+      return codeBlockMatch[1];
+    }
+    
+    // Try to find JSON object in the text
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      return jsonMatch[0];
+    }
+    
+    // Return original text if no JSON found
+    return text;
+  }
+
   private getBestModel(): string {
     // Return the model with best free tier access
     // Currently gemini-1.5-flash-latest has good free tier limits
@@ -256,7 +273,17 @@ REQUIREMENTS:
 
 ${memoryInstruction}
 
-Generate comprehensive metadata that maximizes discoverability while maintaining accuracy and professionalism.` }
+IMPORTANT: You MUST respond with ONLY valid JSON, no markdown, no explanations, no text before or after. The JSON must match this exact structure:
+{
+  "title": "string",
+  "description": "string",
+  "keywordsWithScores": [{"word": "string", "score": "string", "specificity": number, "demand": number, "platformFit": number, "reason": "string"}, ...],
+  "backupKeywords": ["string", ...],
+  "category": "string",
+  "rejectionRisks": ["string", ...]
+}
+
+Return ONLY the JSON object, nothing else.` }
     ];
 
     if (data.frames && data.frames.length > 0) {
@@ -389,14 +416,27 @@ Generate comprehensive metadata that maximizes discoverability while maintaining
               if (retryResponse.ok) {
                 // Success without config - parse JSON from text response
                 const retryData = await retryResponse.json();
-                const jsonStr = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+                let jsonStr = retryData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+                
+                // Extract JSON from markdown code blocks if present
+                jsonStr = this.extractJsonFromResponse(jsonStr);
                 
                 let json: any;
                 try {
                   json = JSON.parse(jsonStr);
                 } catch (parseError) {
                   console.error('Failed to parse JSON response:', parseError, jsonStr);
-                  throw new Error('Invalid JSON response from API. Please try again.');
+                  // Try to extract JSON object from the text
+                  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+                  if (jsonMatch) {
+                    try {
+                      json = JSON.parse(jsonMatch[0]);
+                    } catch (e) {
+                      throw new Error('Invalid JSON response from API. Please try again.');
+                    }
+                  } else {
+                    throw new Error('Invalid JSON response from API. Please try again.');
+                  }
                 }
                 
                 const keywords = (json.keywordsWithScores || []).map((k: any) => {
