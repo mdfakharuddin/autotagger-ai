@@ -505,11 +505,7 @@ function App() {
       setIsProcessingUpload(false);
       setPreviewLoadProgress({ loaded: 0, total: newFiles.length });
       
-      // Use lazy loading for all folders - only preload a tiny initial batch for immediate visual feedback
-      // This makes the UI responsive immediately while previews load in background
-      const initialBatchSize = Math.min(6, newFiles.length); // Only 6 files for instant feedback
-      const initialBatch = newFiles.slice(0, initialBatchSize);
-      
+      // Load previews in parallel batches for faster loading
       const loadPreview = async (item: FileItem) => {
         try {
           const { file, previewUrl } = await fileSystemService.readFileForPreview(item.fileHandle);
@@ -532,10 +528,24 @@ function App() {
         }
       };
       
-      // Load just a few previews immediately for visual feedback, rest will lazy load
-      Promise.all(initialBatch.map(item => loadPreview(item))).then(() => {
-        setToast({ message: `Loaded ${newFiles.length} files. Previews loading as you scroll...`, type: "success" });
-      });
+      // Load all previews in parallel batches for faster overall loading
+      // Use larger batches (20 at a time) to load faster while preventing browser overload
+      const batchSize = 20;
+      const loadAllPreviews = async () => {
+        for (let i = 0; i < newFiles.length; i += batchSize) {
+          const batch = newFiles.slice(i, i + batchSize);
+          // Load batch in parallel
+          await Promise.all(batch.map(item => loadPreview(item)));
+          // Small delay between batches to prevent browser overload
+          if (i + batchSize < newFiles.length) {
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
+        }
+        setToast({ message: `Loaded ${newFiles.length} files with previews`, type: "success" });
+      };
+      
+      // Start loading all previews in background
+      loadAllPreviews();
     } catch (error: any) {
       setIsProcessingUpload(false);
       if (error.message?.includes('not supported')) {

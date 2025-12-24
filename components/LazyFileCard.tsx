@@ -47,7 +47,7 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
         });
       },
       {
-        rootMargin: '500px', // Start loading 500px before card is visible for smoother experience
+        rootMargin: '1000px', // Start loading 1000px before card is visible for much smoother experience
         threshold: 0.01
       }
     );
