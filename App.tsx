@@ -9,7 +9,7 @@ import MetadataSidebar from './components/MetadataSidebar';
 import SettingsModal from './components/SettingsModal';
 import ApiQuotaStatus from './components/ApiQuotaStatus';
 import { FileItem, ProcessingStatus, ApiKeyRecord, PlatformPreset, GenerationProfile, StyleMemory } from './types';
-import { generateId, readFileAsBase64, getVideoFrames, downloadCsv, generateFilename, downloadAllFiles, calculateReadinessScore, generateCsvContent } from './services/fileUtils';
+import { generateId, readFileAsBase64, readFileAsBase64ForAPI, getVideoFrames, downloadCsv, generateFilename, downloadAllFiles, calculateReadinessScore, generateCsvContent } from './services/fileUtils';
 import { geminiService, QuotaExceededInternal } from './services/geminiService';
 import { fileSystemService, FileSystemDirectoryHandle, FileSystemFileHandle } from './services/fileSystemService';
 
@@ -363,7 +363,8 @@ function App() {
           payload = { frames, mimeType: 'image/jpeg' };
         }
       } else {
-        payload = { base64: await readFileAsBase64(processingFile), mimeType: processingFile.type };
+        // Use optimized compression for API calls - reduces payload size significantly
+        payload = { base64: await readFileAsBase64ForAPI(processingFile), mimeType: processingFile.type };
       }
 
       let currentKeySlot = keySlot;
@@ -499,48 +500,42 @@ function App() {
         isFromFileSystem: true
       }));
       
-      // Show all files immediately
+      // Show all files immediately - no waiting for previews
       setFiles(newFiles);
       setIsProcessingUpload(false);
       setPreviewLoadProgress({ loaded: 0, total: newFiles.length });
       
-      // For large folders (100+ files), use lazy loading with Intersection Observer
-      // For smaller folders, preload first batch of previews
-      if (newFiles.length >= 100) {
-        // Large folder: Let LazyFileCard handle preview loading on scroll
-        setToast({ message: `Loaded ${newFiles.length} files. Previews will load as you scroll.`, type: "success" });
-      } else {
-        // Small/medium folder: Preload first batch of previews
-        const initialBatchSize = Math.min(20, newFiles.length);
-        const initialBatch = newFiles.slice(0, initialBatchSize);
-        
-        const loadPreview = async (item: FileItem) => {
-          try {
-            const { file, previewUrl } = await fileSystemService.readFileForPreview(item.fileHandle);
-            if (file.type.startsWith('image/')) {
-              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, file } : f));
-              setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
-            } else if (file.type.startsWith('video/')) {
-              try {
-                const { previewUrl: vidPreview, frames } = await getVideoFrames(file);
-                setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl: vidPreview, base64Frames: frames, file } : f));
-                setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
-              } catch (err) {
-                setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
-                setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
-              }
-            }
-          } catch (err) {
-            console.error('Error loading preview:', err);
+      // Use lazy loading for all folders - only preload a tiny initial batch for immediate visual feedback
+      // This makes the UI responsive immediately while previews load in background
+      const initialBatchSize = Math.min(6, newFiles.length); // Only 6 files for instant feedback
+      const initialBatch = newFiles.slice(0, initialBatchSize);
+      
+      const loadPreview = async (item: FileItem) => {
+        try {
+          const { file, previewUrl } = await fileSystemService.readFileForPreview(item.fileHandle);
+          if (file.type.startsWith('image/')) {
+            setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, file } : f));
             setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+          } else if (file.type.startsWith('video/')) {
+            try {
+              const { previewUrl: vidPreview, frames } = await getVideoFrames(file);
+              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl: vidPreview, base64Frames: frames, file } : f));
+              setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+            } catch (err) {
+              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
+              setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+            }
           }
-        };
-        
-        // Load initial batch in parallel
-        Promise.all(initialBatch.map(item => loadPreview(item))).then(() => {
-          setToast({ message: `Loaded ${newFiles.length} files from folder`, type: "success" });
-        });
-      }
+        } catch (err) {
+          console.error('Error loading preview:', err);
+          setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+        }
+      };
+      
+      // Load just a few previews immediately for visual feedback, rest will lazy load
+      Promise.all(initialBatch.map(item => loadPreview(item))).then(() => {
+        setToast({ message: `Loaded ${newFiles.length} files. Previews loading as you scroll...`, type: "success" });
+      });
     } catch (error: any) {
       setIsProcessingUpload(false);
       if (error.message?.includes('not supported')) {
@@ -654,7 +649,7 @@ function App() {
       const isVideo = processingFile.type.startsWith('video/');
       const payload = isVideo 
         ? { frames: item.base64Frames || [], mimeType: 'image/jpeg' }
-        : { base64: await readFileAsBase64(processingFile), mimeType: processingFile.type };
+        : { base64: await readFileAsBase64ForAPI(processingFile), mimeType: processingFile.type };
 
       const variantMetadata = await geminiService.generateMetadata(keySlot.key, payload, currentProfile, styleMemory, true);
       updateKeySlotTiming(keySlot.id);
@@ -854,8 +849,8 @@ function App() {
               </div>
             )}
 
-            {/* Preview Loading Progress for large folders */}
-            {files.length >= 100 && previewLoadProgress.total > 0 && previewLoadProgress.loaded < previewLoadProgress.total && (
+            {/* Preview Loading Progress for folders */}
+            {files.length >= 20 && previewLoadProgress.total > 0 && previewLoadProgress.loaded < previewLoadProgress.total && (
               <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-100 dark:border-blue-900/20">
                 <div className="flex items-center justify-between mb-2">
                   <span className="text-xs font-medium text-blue-700 dark:text-blue-300">
@@ -886,7 +881,7 @@ function App() {
                 })
                 .map(f => (
                 <div key={f.id} className="col-span-12 sm:col-span-6 lg:col-span-4 xl:col-span-2">
-                  {f.isFromFileSystem && files.length >= 100 ? (
+                  {f.isFromFileSystem && files.length >= 20 ? (
                     <LazyFileCard 
                       item={f} 
                       onClick={(e) => toggleSelection(f.id, e.shiftKey)} 

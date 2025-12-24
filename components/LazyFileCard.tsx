@@ -28,6 +28,7 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
     if (item.previewUrl) {
       setPreviewUrl(item.previewUrl);
       setIsLoadingPreview(false);
+      hasLoadedRef.current = true;
       return;
     }
 
@@ -46,8 +47,8 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
         });
       },
       {
-        rootMargin: '200px', // Start loading 200px before card is visible
-        threshold: 0.1
+        rootMargin: '500px', // Start loading 500px before card is visible for smoother experience
+        threshold: 0.01
       }
     );
 
@@ -58,7 +59,7 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
     return () => {
       observer.disconnect();
     };
-  }, [item.id, item.previewUrl, item.isFromFileSystem]);
+  }, [item.id, item.previewUrl, item.isFromFileSystem, item.fileHandle]);
 
   const loadPreview = async () => {
     if (!item.fileHandle || hasLoadedRef.current) return;

@@ -19,6 +19,60 @@ export const readFileAsBase64 = (file: File): Promise<string> => {
   });
 };
 
+// Optimized version that compresses images before sending to API
+export const readFileAsBase64ForAPI = (file: File, maxWidth: number = 1024, maxHeight: number = 1024, quality: number = 0.7): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    if (!file.type.startsWith('image/')) {
+      // For non-images, use regular base64
+      readFileAsBase64(file).then(resolve).catch(reject);
+      return;
+    }
+
+    const img = new Image();
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    
+    if (!ctx) {
+      readFileAsBase64(file).then(resolve).catch(reject);
+      return;
+    }
+
+    const objectUrl = URL.createObjectURL(file);
+    
+    img.onload = () => {
+      // Calculate new dimensions while maintaining aspect ratio
+      let width = img.width;
+      let height = img.height;
+      
+      if (width > maxWidth || height > maxHeight) {
+        const ratio = Math.min(maxWidth / width, maxHeight / height);
+        width = width * ratio;
+        height = height * ratio;
+      }
+
+      canvas.width = width;
+      canvas.height = height;
+      
+      // Draw and compress
+      ctx.drawImage(img, 0, 0, width, height);
+      const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+      const base64 = compressedDataUrl.split(',')[1];
+      
+      // Clean up and resolve
+      URL.revokeObjectURL(objectUrl);
+      resolve(base64);
+    };
+
+    img.onerror = () => {
+      // Fallback to regular base64 if image processing fails
+      URL.revokeObjectURL(objectUrl);
+      readFileAsBase64(file).then(resolve).catch(reject);
+    };
+
+    img.src = objectUrl;
+  });
+};
+
 export const readFileAsText = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -40,46 +94,91 @@ export const getVideoFrames = (file: File): Promise<{ previewUrl: string, frames
     video.src = objectUrl;
 
     const canvas = document.createElement('canvas');
+    const apiCanvas = document.createElement('canvas'); // Separate canvas for API frames (smaller)
     const frames: string[] = [];
     let previewUrl = '';
-
-    const captureFrame = () => {
-      if (video.videoWidth === 0 || video.videoHeight === 0) return;
-      
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-        if (!previewUrl) previewUrl = dataUrl;
-        frames.push(dataUrl.split(',')[1]);
-      }
-    };
 
     video.onloadeddata = () => {
       const duration = video.duration;
       
-      /**
-       * ENHANCED VIDEO ANALYSIS
-       * Capturing two distinct points to better understand subject motion and environment:
-       * 1. 3 seconds (Industry standard for subject establishment)
-       * 2. Midpoint (To capture peak action or transition)
-       */
-      const points = [
-        Math.min(3, Math.max(0, duration - 0.1)), // 3s mark, or near end if shorter
-        duration / 2
-      ].filter(p => isFinite(p));
+      // Strategic frame capture: 2-3 frames for better AI context
+      // 1. Early frame (2s) - subject establishment
+      // 2. Midpoint - action/transition
+      // 3. Near end (if video is long enough) - conclusion
+      const framePoints: number[] = [];
       
-      // Remove duplicates if video is very short
-      const uniquePoints = Array.from(new Set(points));
+      if (duration > 10) {
+        // Long video: capture 3 frames
+        framePoints.push(Math.min(2, duration * 0.1)); // Early (2s or 10%)
+        framePoints.push(duration * 0.5); // Middle
+        framePoints.push(duration * 0.9); // Near end
+      } else if (duration > 3) {
+        // Medium video: capture 2 frames
+        framePoints.push(Math.min(2, duration * 0.2)); // Early (2s or 20%)
+        framePoints.push(duration * 0.7); // Later
+      } else {
+        // Short video: just 1 frame at midpoint
+        framePoints.push(duration * 0.5);
+      }
+
+      let currentFrameIndex = 0;
       
-      let currentPoint = 0;
-      const seekAndCapture = () => {
-        if (currentPoint < uniquePoints.length) {
-          video.currentTime = uniquePoints[currentPoint];
-          currentPoint++;
+      const captureFrame = () => {
+        if (video.videoWidth === 0 || video.videoHeight === 0) {
+          // Retry after a small delay
+          setTimeout(() => {
+            if (video.videoWidth === 0 || video.videoHeight === 0) {
+              URL.revokeObjectURL(objectUrl);
+              reject(new Error("Video dimensions not available"));
+              return;
+            }
+            captureFrame();
+          }, 300);
+          return;
+        }
+
+        const ctx = canvas.getContext('2d');
+        const apiCtx = apiCanvas.getContext('2d');
+        
+        if (!ctx || !apiCtx) {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error("Canvas context not available"));
+          return;
+        }
+
+        // Full size for preview (only capture once)
+        if (!previewUrl) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          previewUrl = canvas.toDataURL('image/jpeg', 0.8);
+        }
+
+        // Small size (512x512 max) for API to reduce payload
+        const maxApiSize = 512;
+        let apiWidth = video.videoWidth;
+        let apiHeight = video.videoHeight;
+        
+        if (apiWidth > maxApiSize || apiHeight > maxApiSize) {
+          const ratio = Math.min(maxApiSize / apiWidth, maxApiSize / apiHeight);
+          apiWidth = apiWidth * ratio;
+          apiHeight = apiHeight * ratio;
+        }
+
+        apiCanvas.width = apiWidth;
+        apiCanvas.height = apiHeight;
+        apiCtx.drawImage(video, 0, 0, apiWidth, apiHeight);
+        
+        // Low quality for API (0.5) to minimize payload size
+        const apiDataUrl = apiCanvas.toDataURL('image/jpeg', 0.5);
+        frames.push(apiDataUrl.split(',')[1]);
+
+        // Move to next frame
+        currentFrameIndex++;
+        if (currentFrameIndex < framePoints.length) {
+          video.currentTime = framePoints[currentFrameIndex];
         } else {
+          // All frames captured
           URL.revokeObjectURL(objectUrl);
           resolve({ previewUrl, frames });
         }
@@ -87,13 +186,11 @@ export const getVideoFrames = (file: File): Promise<{ previewUrl: string, frames
 
       video.onseeked = () => {
         // Small delay to ensure frame is decoded
-        setTimeout(() => {
-          captureFrame();
-          seekAndCapture();
-        }, 200);
+        setTimeout(captureFrame, 200);
       };
 
-      seekAndCapture();
+      // Start capturing first frame
+      video.currentTime = framePoints[0];
     };
 
     video.onerror = () => {
