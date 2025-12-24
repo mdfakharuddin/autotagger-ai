@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import Header from './components/Header';
 import FileUpload from './components/FileUpload';
 import FileCard from './components/FileCard';
+import LazyFileCard from './components/LazyFileCard';
 import Toast from './components/Toast';
 import BatchActions from './components/BatchActions';
 import MetadataSidebar from './components/MetadataSidebar';
@@ -38,6 +39,8 @@ function App() {
   const [isProcessingUpload, setIsProcessingUpload] = useState(false);
   const [selectedFolder, setSelectedFolder] = useState<FileSystemDirectoryHandle | null>(null);
   const [folderName, setFolderName] = useState<string | null>(null);
+  const [previewLoadProgress, setPreviewLoadProgress] = useState({ loaded: 0, total: 0 });
+  const [searchQuery, setSearchQuery] = useState('');
 
   const activeProcessingIds = useRef<Set<string>>(new Set());
   const GEMINI_FREE_TIER_LIMIT = REQUESTS_PER_MINUTE; // Conservative limit to avoid 429 errors
@@ -499,33 +502,45 @@ function App() {
       // Show all files immediately
       setFiles(newFiles);
       setIsProcessingUpload(false);
+      setPreviewLoadProgress({ loaded: 0, total: newFiles.length });
       
-      // Load previews in parallel batches for better performance
-      const loadPreview = async (item: FileItem) => {
-        try {
-          const { file, previewUrl } = await fileSystemService.readFileForPreview(item.fileHandle);
-          if (file.type.startsWith('image/')) {
-            setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, file } : f));
-          } else if (file.type.startsWith('video/')) {
-            try {
-              const { previewUrl: vidPreview, frames } = await getVideoFrames(file);
-              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl: vidPreview, base64Frames: frames, file } : f));
-            } catch (err) {
-              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
+      // For large folders (100+ files), use lazy loading with Intersection Observer
+      // For smaller folders, preload first batch of previews
+      if (newFiles.length >= 100) {
+        // Large folder: Let LazyFileCard handle preview loading on scroll
+        setToast({ message: `Loaded ${newFiles.length} files. Previews will load as you scroll.`, type: "success" });
+      } else {
+        // Small/medium folder: Preload first batch of previews
+        const initialBatchSize = Math.min(20, newFiles.length);
+        const initialBatch = newFiles.slice(0, initialBatchSize);
+        
+        const loadPreview = async (item: FileItem) => {
+          try {
+            const { file, previewUrl } = await fileSystemService.readFileForPreview(item.fileHandle);
+            if (file.type.startsWith('image/')) {
+              setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, file } : f));
+              setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+            } else if (file.type.startsWith('video/')) {
+              try {
+                const { previewUrl: vidPreview, frames } = await getVideoFrames(file);
+                setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl: vidPreview, base64Frames: frames, file } : f));
+                setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+              } catch (err) {
+                setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
+                setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+              }
             }
+          } catch (err) {
+            console.error('Error loading preview:', err);
+            setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
           }
-        } catch (err) {
-          console.error('Error loading preview:', err);
-        }
-      };
-      
-      // Load previews in parallel batches of 10 to balance speed and browser performance
-      const batchSize = 10;
-      for (let i = 0; i < newFiles.length; i += batchSize) {
-        const batch = newFiles.slice(i, i + batchSize);
-        await Promise.all(batch.map(item => loadPreview(item)));
+        };
+        
+        // Load initial batch in parallel
+        Promise.all(initialBatch.map(item => loadPreview(item))).then(() => {
+          setToast({ message: `Loaded ${newFiles.length} files from folder`, type: "success" });
+        });
       }
-      setToast({ message: `Loaded ${newFiles.length} files from folder`, type: "success" });
     } catch (error: any) {
       setIsProcessingUpload(false);
       if (error.message?.includes('not supported')) {
@@ -803,23 +818,111 @@ function App() {
               selectedCount={selectedIds.size}
             />
 
+            {/* Search/Filter Bar for large folders */}
+            {files.length >= 50 && (
+              <div className="mb-6">
+                <div className="relative max-w-md">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Search files by name..."
+                    className="w-full px-4 py-2.5 pl-10 bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-sm focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 outline-none transition-all"
+                  />
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                  {searchQuery && (
+                    <button
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                      </svg>
+                    </button>
+                  )}
+                </div>
+                {searchQuery && (
+                  <p className="mt-2 text-xs text-slate-500">
+                    Showing {files.filter(f => 
+                      f.fileName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                      f.metadata.title.toLowerCase().includes(searchQuery.toLowerCase())
+                    ).length} of {files.length} files
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* Preview Loading Progress for large folders */}
+            {files.length >= 100 && previewLoadProgress.total > 0 && previewLoadProgress.loaded < previewLoadProgress.total && (
+              <div className="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-100 dark:border-blue-900/20">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-medium text-blue-700 dark:text-blue-300">
+                    Loading previews...
+                  </span>
+                  <span className="text-xs text-blue-600 dark:text-blue-400">
+                    {previewLoadProgress.loaded} / {previewLoadProgress.total}
+                  </span>
+                </div>
+                <div className="w-full h-2 bg-blue-100 dark:bg-blue-900/40 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-blue-500 transition-all duration-300"
+                    style={{ width: `${(previewLoadProgress.loaded / previewLoadProgress.total) * 100}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
             {/* Bootstrap-inspired 12-column grid */}
             <div className="grid grid-cols-12 gap-5 pb-32">
-              {files.map(f => (
+              {files
+                .filter(f => {
+                  if (!searchQuery) return true;
+                  const query = searchQuery.toLowerCase();
+                  return f.fileName.toLowerCase().includes(query) || 
+                         f.metadata.title.toLowerCase().includes(query) ||
+                         f.metadata.keywords.some(k => k.toLowerCase().includes(query));
+                })
+                .map(f => (
                 <div key={f.id} className="col-span-12 sm:col-span-6 lg:col-span-4 xl:col-span-2">
-                  <FileCard 
-                    item={f} 
-                    onClick={(e) => toggleSelection(f.id, e.shiftKey)} 
-                    onRemove={id => {
-                      setFiles(curr => curr.filter(x => x.id !== id));
-                      setSelectedIds(prev => {
-                        const next = new Set(prev);
-                        next.delete(id);
-                        return next;
-                      });
-                    }}
-                    isSelected={selectedIds.has(f.id)} 
-                  />
+                  {f.isFromFileSystem && files.length >= 100 ? (
+                    <LazyFileCard 
+                      item={f} 
+                      onClick={(e) => toggleSelection(f.id, e.shiftKey)} 
+                      onRemove={id => {
+                        setFiles(curr => curr.filter(x => x.id !== id));
+                        setSelectedIds(prev => {
+                          const next = new Set(prev);
+                          next.delete(id);
+                          return next;
+                        });
+                      }}
+                      isSelected={selectedIds.has(f.id)}
+                      onPreviewLoaded={(id, previewUrl, file, frames) => {
+                        setFiles(curr => curr.map(item => 
+                          item.id === id 
+                            ? { ...item, previewUrl, file, base64Frames: frames } 
+                            : item
+                        ));
+                        setPreviewLoadProgress(prev => ({ ...prev, loaded: prev.loaded + 1 }));
+                      }}
+                    />
+                  ) : (
+                    <FileCard 
+                      item={f} 
+                      onClick={(e) => toggleSelection(f.id, e.shiftKey)} 
+                      onRemove={id => {
+                        setFiles(curr => curr.filter(x => x.id !== id));
+                        setSelectedIds(prev => {
+                          const next = new Set(prev);
+                          next.delete(id);
+                          return next;
+                        });
+                      }}
+                      isSelected={selectedIds.has(f.id)} 
+                    />
+                  )}
                 </div>
               ))}
               
