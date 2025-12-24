@@ -66,33 +66,71 @@ export class GeminiService {
   private readonly CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
 
   private extractJsonFromResponse(text: string): string {
+    if (!text || typeof text !== 'string') {
+      return '{}';
+    }
+    
     // Remove markdown code block markers if present
     let cleaned = text.trim();
     
-    // Remove ```json or ``` at the start
-    cleaned = cleaned.replace(/^```(?:json)?\s*/i, '');
-    // Remove ``` at the end
-    cleaned = cleaned.replace(/\s*```$/i, '');
+    // Remove ```json or ``` at the start (handle multiple newlines)
+    cleaned = cleaned.replace(/^```(?:json)?\s*\n?/i, '');
+    // Remove ``` at the end (handle multiple newlines)
+    cleaned = cleaned.replace(/\n?\s*```$/i, '');
     
-    // Try to extract JSON from markdown code blocks (more flexible regex)
-    const codeBlockMatch = cleaned.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-    if (codeBlockMatch) {
+    // Try to extract JSON from markdown code blocks (greedy match to get full JSON)
+    const codeBlockMatch = cleaned.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+    if (codeBlockMatch && codeBlockMatch[1]) {
       return codeBlockMatch[1].trim();
     }
     
     // Try to find JSON object in the text (find the first { and last })
+    // Use a more robust approach: find balanced braces
     const firstBrace = cleaned.indexOf('{');
-    const lastBrace = cleaned.lastIndexOf('}');
-    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-      const jsonCandidate = cleaned.substring(firstBrace, lastBrace + 1);
-      // Validate it looks like JSON
-      if (jsonCandidate.trim().startsWith('{') && jsonCandidate.trim().endsWith('}')) {
-        return jsonCandidate.trim();
+    if (firstBrace === -1) {
+      return cleaned; // No JSON found, return as-is
+    }
+    
+    // Find the matching closing brace by counting braces
+    let braceCount = 0;
+    let lastBrace = -1;
+    for (let i = firstBrace; i < cleaned.length; i++) {
+      if (cleaned[i] === '{') {
+        braceCount++;
+      } else if (cleaned[i] === '}') {
+        braceCount--;
+        if (braceCount === 0) {
+          lastBrace = i;
+          break;
+        }
       }
     }
     
-    // Return cleaned text if no JSON found
-    return cleaned;
+    if (lastBrace !== -1 && lastBrace > firstBrace) {
+      const jsonCandidate = cleaned.substring(firstBrace, lastBrace + 1).trim();
+      // Validate it looks like JSON
+      if (jsonCandidate.startsWith('{') && jsonCandidate.endsWith('}')) {
+        return jsonCandidate;
+      }
+    }
+    
+    // Fallback: try simple regex match (greedy to get full object)
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch && jsonMatch[0]) {
+      const candidate = jsonMatch[0].trim();
+      // Quick validation: should start and end with braces
+      if (candidate.startsWith('{') && candidate.endsWith('}')) {
+        return candidate;
+      }
+    }
+    
+    // Last resort: if text starts with {, try to use it
+    if (cleaned.trim().startsWith('{')) {
+      return cleaned.trim();
+    }
+    
+    // Return empty object if no JSON found (better than invalid JSON)
+    return '{}';
   }
 
   private getBestModel(): string {
@@ -286,7 +324,12 @@ REQUIREMENTS:
 
 ${memoryInstruction}
 
-IMPORTANT: You MUST respond with ONLY valid JSON, no markdown, no explanations, no text before or after. The JSON must match this exact structure:
+CRITICAL: You MUST respond with ONLY valid JSON. Do NOT include:
+- Markdown code blocks (no triple backticks)
+- Explanatory text before or after the JSON
+- Any text outside the JSON object
+
+The response must be a single, valid JSON object matching this exact structure:
 {
   "title": "string",
   "description": "string",
@@ -296,7 +339,7 @@ IMPORTANT: You MUST respond with ONLY valid JSON, no markdown, no explanations, 
   "rejectionRisks": ["string", ...]
 }
 
-Return ONLY the JSON object, nothing else.` }
+Start your response with an opening brace and end with a closing brace. Return ONLY the JSON object, nothing else.` }
     ];
 
     if (data.frames && data.frames.length > 0) {
@@ -544,14 +587,33 @@ Return ONLY the JSON object, nothing else.` }
         }
 
         const responseData = await response.json();
-        const jsonStr = responseData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+        let jsonStr = responseData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+        
+        // Extract JSON from markdown code blocks if present
+        jsonStr = this.extractJsonFromResponse(jsonStr);
         
         let json: any;
         try {
           json = JSON.parse(jsonStr);
         } catch (parseError) {
-          console.error('Failed to parse JSON response:', parseError, jsonStr);
-          throw new Error('Invalid JSON response from API. Please try again.');
+          console.error('Failed to parse JSON response:', parseError, 'Raw text:', jsonStr.substring(0, 200));
+          // Try to extract JSON object from the text as fallback
+          const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+          if (jsonMatch && jsonMatch[0]) {
+            try {
+              json = JSON.parse(jsonMatch[0]);
+            } catch (e) {
+              throw new Error('Invalid JSON response from API. The model returned text instead of JSON. Please try again.');
+            }
+          } else {
+            throw new Error('Invalid JSON response from API. The model returned text instead of JSON. Please try again.');
+          }
+        }
+        
+        // Validate required fields exist
+        if (!json.title || !json.description || !Array.isArray(json.keywordsWithScores)) {
+          console.warn('JSON response missing required fields:', json);
+          // Try to continue with what we have, but log the issue
         }
         
         const keywords = (json.keywordsWithScores || []).map((k: any) => {
