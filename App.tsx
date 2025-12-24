@@ -42,6 +42,7 @@ function App() {
   const [previewLoadProgress, setPreviewLoadProgress] = useState({ loaded: 0, total: 0 });
   const [searchQuery, setSearchQuery] = useState('');
   const [csvFilename, setCsvFilename] = useState<string>('pitagger_export.csv');
+  const [processingProgress, setProcessingProgress] = useState({ loaded: 0, total: 0 });
 
   const activeProcessingIds = useRef<Set<string>>(new Set());
   const GEMINI_FREE_TIER_LIMIT = REQUESTS_PER_MINUTE; // Conservative limit to avoid 429 errors
@@ -360,6 +361,12 @@ function App() {
     try {
       setProcessingCount(p => p + 1);
       setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.PROCESSING } : f));
+      // Update progress
+      const totalPending = files.filter(f => f.status === ProcessingStatus.PENDING || f.status === ProcessingStatus.PROCESSING).length;
+      const completedCount = files.filter(f => f.status === ProcessingStatus.COMPLETED).length;
+      setProcessingProgress({ loaded: completedCount, total: files.length });
+      // Auto-select the currently processing file to show in sidebar
+      setSidebarFileId(item.id);
 
       // Get file for processing (either from handle or existing file object)
       let processingFile: File;
@@ -501,6 +508,10 @@ function App() {
         metadata: { ...metadata, readinessScore },
         newFilename 
       } : f));
+      
+      // Update progress
+      const completedCount = files.filter(f => f.status === ProcessingStatus.COMPLETED || f.id === item.id).length;
+      setProcessingProgress({ loaded: completedCount, total: files.length });
     } catch (e: any) {
       const isRateLimit = e instanceof QuotaExceededInternal || 
                          (e.message && (e.message.includes('429') || 
@@ -547,6 +558,36 @@ function App() {
     } finally {
       activeProcessingIds.current.delete(item.id);
       setProcessingCount(p => Math.max(0, p - 1));
+      
+      // Auto-select the next processing file when current one completes
+      if (isQueueActive) {
+        // Use setTimeout to ensure state is updated
+        setTimeout(() => {
+          setFiles(currentFiles => {
+            const nextProcessing = currentFiles.find(f => 
+              f.status === ProcessingStatus.PROCESSING && 
+              f.id !== item.id
+            );
+            if (nextProcessing) {
+              setSidebarFileId(nextProcessing.id);
+            } else {
+              // If no file is currently processing, select the next pending file
+              const nextPending = currentFiles.find(f => 
+                f.status === ProcessingStatus.PENDING
+              );
+              if (nextPending) {
+                // Will be selected when it starts processing
+              } else {
+                // No more files to process, keep sidebar open with last completed file
+                if (item.status === ProcessingStatus.COMPLETED) {
+                  setSidebarFileId(item.id);
+                }
+              }
+            }
+            return currentFiles;
+          });
+        }, 100);
+      }
     }
   }, [currentProfile, styleMemory, getNextAvailableKeySlot, updateKeySlotTiming]);
 
@@ -948,6 +989,7 @@ function App() {
         isProcessingUpload={isProcessingUpload}
         onResetQuota={handleResetQuota}
         totalDailyQuota={getTotalDailyQuotaRemaining()}
+        processingProgress={processingProgress}
       />
 
       <main className="flex-1 px-4 lg:px-12 py-8 max-w-[1920px] mx-auto w-full">

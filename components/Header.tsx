@@ -23,6 +23,7 @@ interface HeaderProps {
   isProcessingUpload: boolean;
   onResetQuota: (id: string) => void;
   totalDailyQuota: { used: number; limit: number; remaining: number; percentage: number };
+  processingProgress: { loaded: number; total: number };
 }
 
 const Header: React.FC<HeaderProps> = ({ 
@@ -40,6 +41,7 @@ const Header: React.FC<HeaderProps> = ({
   isProcessingUpload,
   onResetQuota,
   totalDailyQuota,
+  processingProgress,
 }) => {
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const allCompleted = totalFiles > 0 && completedFiles === totalFiles;
@@ -180,6 +182,22 @@ const Header: React.FC<HeaderProps> = ({
           <div className="flex items-center gap-2 text-xs text-blue-700 dark:text-blue-300">
             <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
             <span className="font-medium">Processing file uploads...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Always-visible Processing Progress Bar (smaller) */}
+      {totalFiles > 0 && processingProgress.total > 0 && (
+        <div className="px-6 py-1 bg-brand-50 dark:bg-brand-900/10 border-t border-brand-100 dark:border-brand-900/20">
+          <div className="flex items-center justify-between gap-2 text-[10px] text-brand-700 dark:text-brand-300">
+            <span className="font-medium">Processing: {processingProgress.loaded} / {processingProgress.total}</span>
+            <span className="font-medium">{Math.round((processingProgress.loaded / processingProgress.total) * 100)}%</span>
+          </div>
+          <div className="w-full h-0.5 bg-brand-100 dark:bg-brand-900/40 rounded-full mt-1 overflow-hidden">
+            <div 
+              className="h-full bg-brand-500 rounded-full transition-all duration-300" 
+              style={{ width: `${(processingProgress.loaded / processingProgress.total) * 100}%` }} 
+            />
           </div>
         </div>
       )}
