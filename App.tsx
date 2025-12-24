@@ -90,13 +90,17 @@ function App() {
           ? (k.requestCount || 0) 
           : 0; // Reset count if window expired
         
-        // Reset daily quota if window expired (24 hours)
-        const dailyQuotaResetAt = k.dailyQuotaResetAt && k.dailyQuotaResetAt > now
-          ? k.dailyQuotaResetAt
-          : (now + 86400000); // 24 hours
-        const dailyRequestCount = (k.dailyQuotaResetAt && k.dailyQuotaResetAt > now)
-          ? (k.dailyRequestCount || 0)
-          : 0; // Reset daily count if window expired
+        // Reset daily quota if window expired (24 hours from when it was first set)
+        // Only reset if the window has actually expired, otherwise preserve the count
+        let dailyQuotaResetAt = k.dailyQuotaResetAt;
+        let dailyRequestCount = k.dailyRequestCount || 0;
+        
+        if (!dailyQuotaResetAt || dailyQuotaResetAt <= now) {
+          // Window expired or never set - start a new 24-hour window
+          dailyQuotaResetAt = now + 86400000; // 24 hours from now
+          dailyRequestCount = 0; // Reset count
+        }
+        // If window hasn't expired, keep existing count and reset time
         
         return { 
           ...k, 
@@ -244,28 +248,33 @@ function App() {
       if (k.id === id) {
         const now = Date.now();
         
-        // Check if quota window needs reset
-        if (k.quotaResetAt && now >= k.quotaResetAt) {
-          // Reset quota window - start fresh countdown
-          const newQuotaResetAt = now + 60000; // 1 minute window
-          if (quotaTriggered) {
-            return { 
-              ...k, 
-              status: 'cooldown', 
-              cooldownUntil: now + 60000, 
-              lastUsedAt: now, 
-              nextAllowedAt: now + 60000,
-              requestCount: 1,
-              quotaResetAt: newQuotaResetAt
-            };
-          }
-          // Reset daily quota if window expired
-          const dailyQuotaResetAt = k.dailyQuotaResetAt && now < k.dailyQuotaResetAt
-            ? k.dailyQuotaResetAt
-            : (now + 86400000);
-          const dailyRequestCount = (k.dailyQuotaResetAt && now < k.dailyQuotaResetAt)
-            ? (k.dailyRequestCount || 0) + 1
-            : 1;
+               // Check if quota window needs reset
+               if (k.quotaResetAt && now >= k.quotaResetAt) {
+                 // Reset quota window - start fresh countdown
+                 const newQuotaResetAt = now + 60000; // 1 minute window
+                 if (quotaTriggered) {
+                   return { 
+                     ...k, 
+                     status: 'cooldown', 
+                     cooldownUntil: now + 60000, 
+                     lastUsedAt: now, 
+                     nextAllowedAt: now + 60000,
+                     requestCount: 1,
+                     quotaResetAt: newQuotaResetAt
+                   };
+                 }
+                 // Handle daily quota - only reset if window expired, otherwise increment
+                 let dailyQuotaResetAt = k.dailyQuotaResetAt;
+                 let dailyRequestCount = k.dailyRequestCount || 0;
+                 
+                 if (!dailyQuotaResetAt || dailyQuotaResetAt <= now) {
+                   // Daily window expired - start new window
+                   dailyQuotaResetAt = now + 86400000; // 24 hours from now
+                   dailyRequestCount = 1; // Start at 1 (this request)
+                 } else {
+                   // Daily window still active - increment count
+                   dailyRequestCount = dailyRequestCount + 1;
+                 }
           
           return { 
             ...k, 
@@ -280,15 +289,20 @@ function App() {
           };
         }
         
-        // Update within current quota window
-        if (quotaTriggered) {
-          // Update daily quota
-          const dailyQuotaResetAt = k.dailyQuotaResetAt && now < k.dailyQuotaResetAt
-            ? k.dailyQuotaResetAt
-            : (now + 86400000);
-          const newDailyRequestCount = (k.dailyQuotaResetAt && now < k.dailyQuotaResetAt)
-            ? (k.dailyRequestCount || 0) + 1
-            : 1;
+               // Update within current quota window
+               if (quotaTriggered) {
+                 // Handle daily quota - only reset if window expired, otherwise increment
+                 let dailyQuotaResetAt = k.dailyQuotaResetAt;
+                 let newDailyRequestCount = k.dailyRequestCount || 0;
+                 
+                 if (!dailyQuotaResetAt || dailyQuotaResetAt <= now) {
+                   // Daily window expired - start new window
+                   dailyQuotaResetAt = now + 86400000; // 24 hours from now
+                   newDailyRequestCount = 1; // Start at 1 (this request)
+                 } else {
+                   // Daily window still active - increment count
+                   newDailyRequestCount = newDailyRequestCount + 1;
+                 }
           
           return { 
             ...k, 
@@ -302,17 +316,22 @@ function App() {
           };
         }
         
-        const newRequestCount = (k.requestCount || 0) + 1;
-        const limit = k.requestsPerMinute || REQUESTS_PER_MINUTE;
-        const isAtLimit = newRequestCount >= limit;
-        
-        // Update daily quota
-        const dailyQuotaResetAt = k.dailyQuotaResetAt && now < k.dailyQuotaResetAt
-          ? k.dailyQuotaResetAt
-          : (now + 86400000);
-        const newDailyRequestCount = (k.dailyQuotaResetAt && now < k.dailyQuotaResetAt)
-          ? (k.dailyRequestCount || 0) + 1
-          : 1;
+               const newRequestCount = (k.requestCount || 0) + 1;
+               const limit = k.requestsPerMinute || REQUESTS_PER_MINUTE;
+               const isAtLimit = newRequestCount >= limit;
+               
+               // Handle daily quota - only reset if window expired, otherwise increment
+               let dailyQuotaResetAt = k.dailyQuotaResetAt;
+               let newDailyRequestCount = k.dailyRequestCount || 0;
+               
+               if (!dailyQuotaResetAt || dailyQuotaResetAt <= now) {
+                 // Daily window expired - start new window
+                 dailyQuotaResetAt = now + 86400000; // 24 hours from now
+                 newDailyRequestCount = 1; // Start at 1 (this request)
+               } else {
+                 // Daily window still active - increment count
+                 newDailyRequestCount = newDailyRequestCount + 1;
+               }
         
         // If at limit, set cooldown until quota resets
         if (isAtLimit) {
