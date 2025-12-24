@@ -297,38 +297,70 @@ Generate comprehensive metadata that maximizes discoverability while maintaining
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          const errMsg = errorData.error?.message || '';
+          const errMsg = errorData.error?.message || errorData.error?.message || '';
           const statusCode = response.status;
+          
+          // Check for fundamental API issues that will affect all models
+          const isApiKeyIssue = statusCode === 400 && (
+            errMsg.toLowerCase().includes('api key') ||
+            errMsg.toLowerCase().includes('invalid api key') ||
+            errMsg.toLowerCase().includes('api key not valid') ||
+            errMsg.toLowerCase().includes('authentication') ||
+            errMsg.toLowerCase().includes('permission denied')
+          );
+          
+          const isBillingIssue = statusCode === 403 || 
+            errMsg.toLowerCase().includes('billing') ||
+            errMsg.toLowerCase().includes('quota exceeded') ||
+            errMsg.toLowerCase().includes('payment required');
+          
+          // If it's a fundamental API issue (key, billing), don't try other models
+          if (isApiKeyIssue || isBillingIssue) {
+            throw new Error(isApiKeyIssue 
+              ? 'Invalid API key. Please check your API key in Settings.' 
+              : 'Billing or quota issue. Please check your Google Cloud Console.');
+          }
           
           // If it's a rate limit error, try next model
           const isRateLimit = statusCode === 429 || 
             errMsg.includes('429') || 
-            errMsg.toLowerCase().includes('quota') || 
             errMsg.toLowerCase().includes('rate limit') ||
-            errMsg.toLowerCase().includes('too many requests') ||
-            errMsg.toLowerCase().includes('quota exceeded');
+            errMsg.toLowerCase().includes('too many requests');
           
-          // 400 Bad Request usually means invalid model name
-          const isInvalidModel = statusCode === 400 && (
-            errMsg.toLowerCase().includes('invalid model') ||
-            errMsg.toLowerCase().includes('not found') ||
-            errMsg.toLowerCase().includes('bad request') ||
-            !errMsg.toLowerCase().includes('api key') // If it's 400 but not about API key, it's likely invalid model
-          );
+          // 400 Bad Request - could be invalid model OR API key issue
+          // If we've already tried the first model and it's 400, likely all will fail
+          const isInvalidModel = statusCode === 400 && 
+            !isApiKeyIssue && // Not an API key issue
+            (errMsg.toLowerCase().includes('invalid model') ||
+             errMsg.toLowerCase().includes('not found') ||
+             errMsg.toLowerCase().includes('bad request'));
           
-          // 404 can mean model not found OR quota exceeded (API key disabled)
+          // 404 can mean model not found
           const isModelNotFound = statusCode === 404 || 
-            errMsg.toLowerCase().includes('not found') || 
-            errMsg.toLowerCase().includes('invalid model') ||
-            errMsg.toLowerCase().includes('404') ||
-            errMsg.toLowerCase().includes('permission denied') ||
-            errMsg.toLowerCase().includes('api key not valid');
+            (errMsg.toLowerCase().includes('not found') && 
+             !errMsg.toLowerCase().includes('api key'));
           
-          if (isRateLimit || isModelNotFound || isInvalidModel) {
+          // If first model fails with 400 and it's not clearly an API key issue, 
+          // and we're in auto mode, try one more model then give up
+          if (isRateLimit) {
             lastError = { message: errMsg, status: statusCode, statusCode };
-            const reason = isRateLimit ? 'rate limit' : isInvalidModel ? 'invalid model' : 'not found/disabled';
-            console.warn(`Model ${modelName} unavailable (${reason}), trying next...`);
-            continue; // Try next model
+            console.warn(`Model ${modelName} rate limited, trying next...`);
+            continue; // Try next model for rate limits
+          }
+          
+          if (isInvalidModel || isModelNotFound) {
+            // If this is the first model and it's invalid, try one more then stop
+            // If we've tried multiple models and all fail, it's likely a fundamental issue
+            const modelIndex = modelsToTry.indexOf(model);
+            if (modelIndex === 0 && modelsToTry.length > 1) {
+              // First model failed, try one more
+              lastError = { message: errMsg, status: statusCode, statusCode };
+              console.warn(`Model ${modelName} unavailable, trying next model...`);
+              continue;
+            } else {
+              // Multiple models failed or last model - likely fundamental issue
+              throw new Error(`All models unavailable. ${errMsg || 'Please check your API key and Google Cloud Console settings.'}`);
+            }
           }
           
           // Other errors, throw immediately
@@ -387,35 +419,42 @@ Generate comprehensive metadata that maximizes discoverability while maintaining
       const errMsg = lastError.message || '';
       const statusCode = lastError.status || lastError.statusCode || '';
       
-      // Check for quota/rate limit errors first (including 404 that might be quota-related)
+      // Check for quota/rate limit errors first
       const isQuotaError = statusCode === 429 || 
           errMsg.includes('429') || 
           errMsg.toLowerCase().includes('quota') || 
           errMsg.toLowerCase().includes('rate limit') ||
           errMsg.toLowerCase().includes('too many requests') ||
-          errMsg.toLowerCase().includes('quota exceeded') ||
-          errMsg.toLowerCase().includes('billing') ||
-          errMsg.toLowerCase().includes('permission denied');
+          errMsg.toLowerCase().includes('quota exceeded');
       
-      // 404 can also mean quota exceeded if API key was disabled
-      const is404Quota = (statusCode === 404 || errMsg.toLowerCase().includes('404')) && 
-                         (errMsg.toLowerCase().includes('api key') || 
-                          errMsg.toLowerCase().includes('disabled') ||
-                          errMsg.toLowerCase().includes('not valid'));
-      
-      if (isQuotaError || is404Quota) {
+      if (isQuotaError) {
         throw new QuotaExceededInternal();
       }
       
-      // Check if all models returned 404 - could be quota or access issue
-      if (statusCode === 404 || errMsg.toLowerCase().includes('404') || errMsg.toLowerCase().includes('not found')) {
-        throw new Error('API key may have reached quota limit or been disabled. Please check your Google Cloud Console for quota status, enable billing if needed, or try resetting your API key quota in Settings.');
+      // Check for API key or billing issues
+      const isApiKeyIssue = statusCode === 400 && (
+        errMsg.toLowerCase().includes('api key') ||
+        errMsg.toLowerCase().includes('invalid api key') ||
+        errMsg.toLowerCase().includes('authentication')
+      );
+      
+      const isBillingIssue = statusCode === 403 || 
+        errMsg.toLowerCase().includes('billing') ||
+        errMsg.toLowerCase().includes('payment required');
+      
+      if (isApiKeyIssue) {
+        throw new Error('Invalid API key. Please verify your API key in Settings and ensure it has access to the Generative Language API.');
       }
       
-      throw lastError;
+      if (isBillingIssue) {
+        throw new Error('Billing or quota issue. Please check your Google Cloud Console - billing may need to be enabled or quota limits may have been reached.');
+      }
+      
+      // Generic error with helpful message
+      throw new Error(`Unable to process request: ${errMsg || 'Please check your API key and Google Cloud Console settings.'}`);
     }
     
-    throw new Error('No models available. Please verify your API key has access to Gemini models.');
+    throw new Error('No models available. Please verify your API key has access to Gemini models in Google Cloud Console.');
   }
 }
 

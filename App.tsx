@@ -487,6 +487,17 @@ function App() {
                           e.message.toLowerCase().includes('rate limit') ||
                           e.message.toLowerCase().includes('quota limit')));
       
+      const isApiKeyIssue = e.message && (
+        e.message.toLowerCase().includes('invalid api key') ||
+        e.message.toLowerCase().includes('api key') ||
+        e.message.toLowerCase().includes('authentication')
+      );
+      
+      const isBillingIssue = e.message && (
+        e.message.toLowerCase().includes('billing') ||
+        e.message.toLowerCase().includes('payment required')
+      );
+      
       if (isRateLimit) {
         // Re-queue the file for later processing
         setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.PENDING } : f));
@@ -497,6 +508,17 @@ function App() {
             type: "error" 
           });
         }
+      } else if (isApiKeyIssue || isBillingIssue) {
+        // Stop processing queue for API key/billing issues
+        setIsQueueActive(false);
+        const errorMsg = e.message || (isApiKeyIssue ? "Invalid API key" : "Billing issue");
+        setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: errorMsg } : f));
+        setToast({ 
+          message: isApiKeyIssue 
+            ? "Invalid API key. Please check your API key in Settings." 
+            : "Billing or quota issue. Please check your Google Cloud Console.",
+          type: "error" 
+        });
       } else {
         const errorMsg = e.message || "Analysis failed.";
         setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: errorMsg } : f));
