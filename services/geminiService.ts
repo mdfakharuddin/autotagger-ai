@@ -64,10 +64,22 @@ export class GeminiService {
   }
 
   async testKey(apiKey: string): Promise<boolean> {
+    // Validate API key format
+    const trimmedKey = apiKey.trim();
+    if (!trimmedKey || trimmedKey.length < 20) {
+      console.warn('API key appears to be invalid (too short or empty)');
+      return false;
+    }
+
     // Try models in order until one works using REST API
     for (const model of AVAILABLE_MODELS) {
       try {
-        const response = await fetch(`${API_BASE_URL}/models/${model}:generateContent?key=${apiKey}`, {
+        // Use query parameter for API key (Gemini API requires it this way)
+        // Ensure proper URL encoding
+        const url = new URL(`${API_BASE_URL}/models/${model}:generateContent`);
+        url.searchParams.set('key', trimmedKey);
+        
+        const response = await fetch(url.toString(), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -94,6 +106,12 @@ export class GeminiService {
           errMsg.toLowerCase().includes('too many requests');
         
         if (isQuotaError) {
+          return false;
+        }
+
+        // If it's an invalid API key error, don't try other models
+        if (statusCode === 400 && (errMsg.toLowerCase().includes('api key') || errMsg.toLowerCase().includes('invalid'))) {
+          console.warn(`Invalid API key:`, errMsg);
           return false;
         }
 
@@ -152,9 +170,15 @@ export class GeminiService {
 
     // Try models in order, starting with the one with best free tier access
     let lastError: any = null;
+    const trimmedKey = apiKey.trim();
+    
     for (const model of AVAILABLE_MODELS) {
       try {
-        const response = await fetch(`${API_BASE_URL}/models/${model}:generateContent?key=${apiKey}`, {
+        // Use URL object to properly construct the query string
+        const url = new URL(`${API_BASE_URL}/models/${model}:generateContent`);
+        url.searchParams.set('key', trimmedKey);
+        
+        const response = await fetch(url.toString(), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
