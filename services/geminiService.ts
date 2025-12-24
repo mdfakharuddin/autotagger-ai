@@ -480,21 +480,20 @@ Return ONLY the JSON object.` }
                   });
                 }
                 
-                const keywords = (json.keywordsWithScores || []).map((k: any) => {
-                  // Handle both object format {word: "..."} and string format
+                // Simplified: just extract keywords array
+                const keywords = (json.keywords || []).map((k: any) => {
                   const word = typeof k === 'string' ? k : (k.word || k);
                   return word?.toLowerCase().trim();
                 }).filter(Boolean);
-                const backupKeywords = (json.backupKeywords || []).map((k: string) => k.toLowerCase().trim()).filter(Boolean);
 
                 return {
                   title: json.title || "Untitled Stock Asset",
-                  description: json.description || "",
+                  description: "",
                   keywords: keywords.slice(0, 50),
-                  backupKeywords: backupKeywords,
-                  keywordScores: json.keywordsWithScores || [],
-                  rejectionRisks: json.rejectionRisks || [],
-                  category: json.category || "General",
+                  backupKeywords: [],
+                  keywordScores: [],
+                  rejectionRisks: [],
+                  category: "General",
                   releases: ""
                 };
               }
