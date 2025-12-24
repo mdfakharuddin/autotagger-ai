@@ -11,40 +11,18 @@ export class QuotaExceededInternal extends Error {
 // Use REST API directly instead of SDK to avoid v1beta endpoint issues
 const API_BASE_URL = 'https://generativelanguage.googleapis.com/v1';
 
+// Simplified schema - only title and keywords needed
 const METADATA_SCHEMA = {
   type: "object",
   properties: {
     title: { type: "string", description: "SEO-optimized title, max 180 chars." },
-    description: { type: "string", description: "Detailed descriptive text for stock metadata." },
-    keywordsWithScores: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          word: { type: "string" },
-          score: { type: "string", description: "strong, medium, or weak" },
-          specificity: { type: "integer", description: "Score 0-100 for niche accuracy" },
-          demand: { type: "integer", description: "Estimated search volume 0-100" },
-          platformFit: { type: "integer", description: "Suitability for stock platform indexing 0-100" },
-          reason: { type: "string", description: "Short justification for the score" }
-        },
-        required: ["word", "score", "specificity", "demand", "platformFit"]
-      },
-      description: "Exactly 50 high-priority keywords. First 10 MUST be primary subjects."
-    },
-    backupKeywords: {
+    keywords: {
       type: "array",
       items: { type: "string" },
-      description: "20 additional relevant keywords as a suggestion pool."
-    },
-    category: { type: "string", description: "Industry standard stock category name." },
-    rejectionRisks: {
-      type: "array",
-      items: { type: "string" },
-      description: "Potential trademark, quality or policy issues."
+      description: "50 relevant keywords for stock photography search."
     }
   },
-  required: ["title", "description", "keywordsWithScores", "backupKeywords", "category", "rejectionRisks"],
+  required: ["title", "keywords"],
 };
 
 // Models ordered by free tier access (best first)
@@ -292,54 +270,21 @@ export class GeminiService {
     const variantModifier = isVariant ? "Provide a fresh perspective focusing on different details." : "";
 
     const promptParts: any[] = [
-      { text: `You are an expert stock photography metadata generator. Analyze this image/video and generate comprehensive, SEO-optimized metadata.
+      { text: `Analyze this image/video and generate SEO metadata. Profile: ${profile}. ${profileInstruction} ${variantModifier}
 
-Profile: ${profile}
-Style Guide: ${profileInstruction}
-${variantModifier}
-
-REQUIREMENTS:
-1. Title: Create a compelling, SEO-optimized title (max 180 characters) that accurately describes the content and includes key search terms.
-
-2. Description: Write a detailed, professional description (2-4 sentences) that:
-   - Clearly describes what's in the image/video
-   - Includes relevant context, setting, and mood
-   - Uses natural language that's both descriptive and keyword-rich
-   - Avoids generic phrases, be specific
-
-3. Keywords: Generate exactly 50 PRIMARY keywords (not 70 total). Each keyword must be in the keywordsWithScores array with this structure:
-   - Each item: {"word": "keyword", "score": "strong|medium|weak", "specificity": 0-100, "demand": 0-100, "platformFit": 0-100, "reason": "brief explanation"}
-   - Plus 20 BACKUP keywords as a simple string array: ["keyword1", "keyword2", ...]
-   - Prioritize specific, searchable terms over generic ones
-   - Include both broad and niche keywords
-
-4. Category: Assign the most appropriate stock photography category (e.g., "Lifestyle", "Business", "Nature", "Technology", etc.)
-
-5. Rejection Risks: Identify any potential issues such as:
-   - Trademarked items or logos
-   - Recognizable people without releases
-   - Copyright concerns
-   - Quality issues
-   - Policy violations
+Generate ONLY:
+1. Title: SEO-optimized title (max 180 chars) describing the content
+2. Keywords: 50 relevant searchable keywords as a simple array
 
 ${memoryInstruction}
 
-CRITICAL: You MUST respond with ONLY valid JSON. Do NOT include:
-- Markdown code blocks (no triple backticks)
-- Explanatory text before or after the JSON
-- Any text outside the JSON object
-
-The response must be a single, valid JSON object matching this exact structure:
+CRITICAL: Respond with ONLY valid JSON, no markdown, no explanations. Structure:
 {
   "title": "string",
-  "description": "string",
-  "keywordsWithScores": [{"word": "string", "score": "string", "specificity": number, "demand": number, "platformFit": number, "reason": "string"}, ...],
-  "backupKeywords": ["string", ...],
-  "category": "string",
-  "rejectionRisks": ["string", ...]
+  "keywords": ["keyword1", "keyword2", ...]
 }
 
-Start your response with an opening brace and end with a closing brace. Return ONLY the JSON object, nothing else.` }
+Return ONLY the JSON object.` }
     ];
 
     if (data.frames && data.frames.length > 0) {
@@ -701,31 +646,30 @@ Start your response with an opening brace and end with a closing brace. Return O
         }
         
         // Validate required fields exist
-        if (!json.title || !json.description || !Array.isArray(json.keywordsWithScores)) {
+        if (!json.title || !Array.isArray(json.keywords)) {
           console.warn('JSON response missing required fields:', {
             hasTitle: !!json.title,
-            hasDescription: !!json.description,
-            hasKeywords: Array.isArray(json.keywordsWithScores),
+            hasKeywords: Array.isArray(json.keywords),
             keys: Object.keys(json)
           });
           // Try to continue with what we have, but log the issue
         }
         
-        const keywords = (json.keywordsWithScores || []).map((k: any) => {
-          // Handle both object format {word: "..."} and string format
+        // Simplified: just extract keywords array (can be strings or objects)
+        const keywords = (json.keywords || []).map((k: any) => {
+          // Handle both string format and object format {word: "..."}
           const word = typeof k === 'string' ? k : (k.word || k);
           return word?.toLowerCase().trim();
         }).filter(Boolean);
-        const backupKeywords = (json.backupKeywords || []).map((k: string) => k.toLowerCase().trim()).filter(Boolean);
 
         return {
           title: json.title || "Untitled Stock Asset",
-          description: json.description || "",
+          description: "", // Not needed, keep empty
           keywords: keywords.slice(0, 50),
-          backupKeywords: backupKeywords,
-          keywordScores: json.keywordsWithScores || [],
-          rejectionRisks: json.rejectionRisks || [],
-          category: json.category || "General",
+          backupKeywords: [], // Not needed
+          keywordScores: [], // Not needed
+          rejectionRisks: [], // Not needed
+          category: "General", // Default category
           releases: ""
         };
       } catch (e: any) {
