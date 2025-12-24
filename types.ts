@@ -29,11 +29,15 @@ export interface ApiKeyRecord {
   key: string;
   label: string;
   addedAt: number;
-  // Internal scheduling tracking (Invisible to user)
+  // Internal scheduling tracking
   status: 'active' | 'cooldown';
   cooldownUntil?: number;
   lastUsedAt?: number;
   nextAllowedAt?: number;
+  // Quota tracking (per minute)
+  requestCount?: number;
+  quotaResetAt?: number;
+  requestsPerMinute?: number;
 }
 
 export interface KeywordScore {

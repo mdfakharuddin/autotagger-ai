@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { PlatformPreset } from '../types';
+import { PlatformPreset, ApiKeyRecord } from '../types';
+import ApiQuotaStatus from './ApiQuotaStatus';
 
 interface HeaderProps {
   totalFiles: number;
@@ -18,6 +19,8 @@ interface HeaderProps {
   isSyncingToSheets: boolean;
   activeKeysCount: number;
   isDirectoryPickerSupported: boolean;
+  apiKeys: ApiKeyRecord[];
+  isProcessingUpload: boolean;
 }
 
 const Header: React.FC<HeaderProps> = ({ 
@@ -29,14 +32,18 @@ const Header: React.FC<HeaderProps> = ({
   onStartQueue,
   onStopQueue,
   onOpenSettings,
+  apiKeys,
+  isProcessingUpload,
 }) => {
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   const allCompleted = totalFiles > 0 && completedFiles === totalFiles;
 
   return (
-    <header className="sticky top-0 z-40 w-full bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 h-16 px-6 flex items-center justify-between shadow-sm">
-      {/* Brand Section */}
-      <div className="flex items-center gap-4">
+    <>
+      <header className="sticky top-0 z-40 w-full bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 shadow-sm">
+        <div className="h-16 px-6 flex items-center justify-between">
+          {/* Brand Section */}
+          <div className="flex items-center gap-4">
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 525.83 123.45" className="h-8 w-auto">
           <defs>
             <style>{`.logo-bg { fill: #1a73e8; } .logo-fg { fill: #fff; } .logo-text { fill: currentColor; font-weight: 700; font-size: 88.58px; }`}</style>
@@ -110,7 +117,26 @@ const Header: React.FC<HeaderProps> = ({
           </button>
         </div>
       </div>
-    </header>
+        </div>
+      
+      {/* API Quota Status Bar */}
+      {apiKeys.length > 0 && (
+        <div className="px-6 py-2 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800">
+          <ApiQuotaStatus apiKeys={apiKeys} />
+        </div>
+      )}
+      
+      {/* Upload Progress Indicator */}
+      {isProcessingUpload && (
+        <div className="px-6 py-1.5 bg-blue-50 dark:bg-blue-900/20 border-t border-blue-100 dark:border-blue-900/20">
+          <div className="flex items-center gap-2 text-xs text-blue-700 dark:text-blue-300">
+            <div className="w-4 h-4 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+            <span className="font-medium">Processing file uploads...</span>
+          </div>
+        </div>
+      )}
+      </header>
+    </>
   );
 };
 

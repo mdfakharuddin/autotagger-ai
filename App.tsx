@@ -6,6 +6,7 @@ import Toast from './components/Toast';
 import BatchActions from './components/BatchActions';
 import MetadataSidebar from './components/MetadataSidebar';
 import SettingsModal from './components/SettingsModal';
+import ApiQuotaStatus from './components/ApiQuotaStatus';
 import { FileItem, ProcessingStatus, ApiKeyRecord, PlatformPreset, GenerationProfile, StyleMemory } from './types';
 import { generateId, readFileAsBase64, getVideoFrames, downloadCsv, generateFilename, downloadAllFiles, calculateReadinessScore } from './services/fileUtils';
 import { geminiService, QuotaExceededInternal } from './services/geminiService';
@@ -30,8 +31,11 @@ function App() {
     lastUsedProfile: GenerationProfile.COMMERCIAL,
     customProfilePrompts: {} as any
   });
+  const [uploadQueue, setUploadQueue] = useState<File[]>([]);
+  const [isProcessingUpload, setIsProcessingUpload] = useState(false);
 
   const activeProcessingIds = useRef<Set<string>>(new Set());
+  const GEMINI_FREE_TIER_LIMIT = 60; // 60 requests per minute for free tier
 
   useEffect(() => {
     const mem = localStorage.getItem('autotagger_style_mem_v4');
@@ -40,12 +44,16 @@ function App() {
     const keys = localStorage.getItem('autotagger_api_vault_v4');
     if (keys) {
       const parsedKeys: ApiKeyRecord[] = JSON.parse(keys);
+      const now = Date.now();
       setApiKeys(parsedKeys.map(k => ({ 
         ...k, 
         status: 'active', 
         cooldownUntil: 0, 
         lastUsedAt: 0, 
-        nextAllowedAt: 0 
+        nextAllowedAt: 0,
+        requestCount: k.requestCount || 0,
+        quotaResetAt: k.quotaResetAt || (now + 60000), // Reset after 1 minute
+        requestsPerMinute: k.requestsPerMinute || GEMINI_FREE_TIER_LIMIT
       })));
     }
   }, []);
@@ -57,25 +65,33 @@ function App() {
   };
 
   const handleAddKey = (key: string, label: string) => {
+    const now = Date.now();
     const newKeyRecord: ApiKeyRecord = { 
       id: generateId(), 
       key, 
       label, 
-      addedAt: Date.now(),
+      addedAt: now,
       status: 'active',
       cooldownUntil: 0,
       lastUsedAt: 0,
-      nextAllowedAt: 0
+      nextAllowedAt: 0,
+      requestCount: 0,
+      quotaResetAt: now + 60000,
+      requestsPerMinute: GEMINI_FREE_TIER_LIMIT
     };
     const newKeys = [...apiKeys, newKeyRecord];
     setApiKeys(newKeys);
-    localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(newKeys.map(({id, key, label, addedAt}) => ({id, key, label, addedAt}))));
+    localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(newKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute}) => ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute}))));
   };
 
   const handleRemoveKey = (id: string) => {
     const newKeys = apiKeys.filter(k => k.id !== id);
     setApiKeys(newKeys);
-    localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(newKeys.map(({id, key, label, addedAt}) => ({id, key, label, addedAt}))));
+    localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(
+      newKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute}) => 
+        ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute})
+      )
+    ));
   };
 
   const getNextAvailableKeySlot = useCallback((): ApiKeyRecord | null => {
@@ -91,13 +107,69 @@ function App() {
     setApiKeys(prev => prev.map(k => {
       if (k.id === id) {
         const now = Date.now();
-        if (quotaTriggered) {
-          return { ...k, status: 'cooldown', cooldownUntil: now + 90000, lastUsedAt: now, nextAllowedAt: now + 90000 };
+        
+        // Check if quota window needs reset
+        if (k.quotaResetAt && now >= k.quotaResetAt) {
+          // Reset quota window - start fresh countdown
+          const newQuotaResetAt = now + 60000; // 1 minute window
+          if (quotaTriggered) {
+            return { 
+              ...k, 
+              status: 'cooldown', 
+              cooldownUntil: now + 60000, 
+              lastUsedAt: now, 
+              nextAllowedAt: now + 60000,
+              requestCount: 1,
+              quotaResetAt: newQuotaResetAt
+            };
+          }
+          return { 
+            ...k, 
+            status: 'active', 
+            cooldownUntil: 0, 
+            lastUsedAt: now, 
+            nextAllowedAt: now + MIN_SAFE_INTERVAL_MS,
+            requestCount: 1, // Reset to 1 (this request)
+            quotaResetAt: newQuotaResetAt
+          };
         }
-        return { ...k, status: 'active', cooldownUntil: 0, lastUsedAt: now, nextAllowedAt: now + MIN_SAFE_INTERVAL_MS };
+        
+        // Update within current quota window
+        if (quotaTriggered) {
+          return { 
+            ...k, 
+            status: 'cooldown', 
+            cooldownUntil: now + 60000, 
+            lastUsedAt: now, 
+            nextAllowedAt: now + 60000,
+            requestCount: (k.requestCount || 0) + 1
+          };
+        }
+        
+        const newRequestCount = (k.requestCount || 0) + 1;
+        const isNearLimit = newRequestCount >= (k.requestsPerMinute || GEMINI_FREE_TIER_LIMIT) * 0.8;
+        
+        return { 
+          ...k, 
+          status: isNearLimit ? 'cooldown' : 'active', 
+          cooldownUntil: 0, 
+          lastUsedAt: now, 
+          nextAllowedAt: now + MIN_SAFE_INTERVAL_MS,
+          requestCount: newRequestCount
+        };
       }
       return k;
     }));
+    
+    // Persist updated keys
+    setApiKeys(currentKeys => {
+      localStorage.setItem('autotagger_api_vault_v4', JSON.stringify(
+        currentKeys.map(({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute}) => 
+          ({id, key, label, addedAt, requestCount, quotaResetAt, requestsPerMinute})
+        )
+      ));
+      return currentKeys;
+    });
   }, []);
 
   const processFile = useCallback(async (item: FileItem) => {
@@ -145,26 +217,45 @@ function App() {
   }, [currentProfile, styleMemory, getNextAvailableKeySlot, updateKeySlotTiming]);
 
   const handleFilesSelected = async (selectedFiles: File[]) => {
-    const newFiles: FileItem[] = await Promise.all(selectedFiles.map(async (f) => ({
+    // Add all files to queue immediately (basic info only)
+    const newFiles: FileItem[] = selectedFiles.map(f => ({
       id: generateId(),
       file: f,
-      previewUrl: f.type.startsWith('image/') ? URL.createObjectURL(f) : '',
+      previewUrl: '', // Will be set sequentially
       status: ProcessingStatus.PENDING,
       metadata: { title: '', description: '', keywords: [], category: '' }
-    })));
+    }));
 
     setFiles(prev => [...prev, ...newFiles]);
-
-    newFiles.forEach(async (item) => {
-      if (item.file.type.startsWith('video/')) {
-        try {
-          const { previewUrl, frames } = await getVideoFrames(item.file);
-          setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, base64Frames: frames } : f));
-        } catch (err) {
-          setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
+    
+    // Process uploads sequentially to prevent browser crashes
+    for (const item of newFiles) {
+      setIsProcessingUpload(true);
+      
+      try {
+        // Generate preview for images immediately (lightweight)
+        if (item.file.type.startsWith('image/')) {
+          const previewUrl = URL.createObjectURL(item.file);
+          setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl } : f));
+        } 
+        // Process videos sequentially (heavy operation)
+        else if (item.file.type.startsWith('video/')) {
+          try {
+            const { previewUrl, frames } = await getVideoFrames(item.file);
+            setFiles(curr => curr.map(f => f.id === item.id ? { ...f, previewUrl, base64Frames: frames } : f));
+          } catch (err) {
+            setFiles(curr => curr.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Preview error." } : f));
+          }
         }
+      } catch (err) {
+        console.error('Error processing file:', err);
       }
-    });
+      
+      // Small delay between files to prevent browser overload
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    
+    setIsProcessingUpload(false);
   };
 
   useEffect(() => {
@@ -176,6 +267,7 @@ function App() {
         return now >= (k.nextAllowedAt || 0) && (k.status === 'active' || (k.status === 'cooldown' && k.cooldownUntil! < now));
       });
       
+      // Process files in parallel based on available API keys (reverted to parallel)
       if (activeKeys.length > 0 && processingCount < apiKeys.length) {
         const pending = files.filter(f => f.status === ProcessingStatus.PENDING);
         const nextFile = pending.find(f => !activeProcessingIds.current.has(f.id));
@@ -258,6 +350,8 @@ function App() {
         isSyncingToSheets={false}
         activeKeysCount={apiKeys.length}
         isDirectoryPickerSupported={false}
+        apiKeys={apiKeys}
+        isProcessingUpload={isProcessingUpload}
       />
 
       <main className="flex-1 px-4 lg:px-12 py-8 max-w-[1920px] mx-auto w-full">
