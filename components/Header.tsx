@@ -115,15 +115,12 @@ const Header: React.FC<HeaderProps> = ({
             </button>
             {isExportMenuOpen && (
               <div className="absolute top-full right-0 mt-2 w-48 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl shadow-xl z-50 overflow-hidden py-1 animate-fade-in">
-                {[PlatformPreset.STANDARD, PlatformPreset.ADOBE, PlatformPreset.SHUTTERSTOCK, PlatformPreset.GETTY].map(preset => (
-                  <button
-                    key={preset}
-                    onClick={() => { onExport(preset); setIsExportMenuOpen(false); }}
-                    className="w-full px-4 py-2.5 text-left text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
-                  >
-                    {preset}
-                  </button>
-                ))}
+                <button
+                  onClick={() => { onExport(PlatformPreset.STANDARD); setIsExportMenuOpen(false); }}
+                  className="w-full px-4 py-2.5 text-left text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                >
+                  Export CSV
+                </button>
               </div>
             )}
           </div>

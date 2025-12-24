@@ -266,7 +266,8 @@ export class FileSystemService {
   ): Promise<void> {
     try {
       const fileHandle = await (directoryHandle as any).getFileHandle(filename, { create: true });
-      const headers = 'Filename,Title,Keywords,Category,Releases,Description\n';
+      // Simplified CSV headers: Filename, Title, Tags, Suggestions
+      const headers = 'Filename,Title,Tags,Suggestions\n';
       const writable = await (fileHandle as any).createWritable();
       await writable.write(headers);
       await writable.close();
@@ -356,7 +357,8 @@ export class FileSystemService {
         // File doesn't exist, create it with headers
         if (e.name === 'NotFoundError' || e.name === 'TypeError') {
           fileHandle = await (directoryHandle as any).getFileHandle(filename, { create: true });
-          existingContent = 'Filename,Title,Keywords,Category,Releases,Description\n';
+          // Simplified CSV headers: Filename, Title, Tags, Suggestions
+          existingContent = 'Filename,Title,Tags,Suggestions\n';
         } else {
           throw e;
         }

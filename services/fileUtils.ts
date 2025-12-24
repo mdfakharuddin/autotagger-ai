@@ -259,23 +259,18 @@ export const generateCsvRow = (item: FileItem, preset: PlatformPreset = Platform
   const filename = item.newFilename || item.fileName || (item.file ? item.file.name : 'unknown');
   const fn = toCsvField(filename);
   const title = toCsvField(item.metadata.title);
-  const kws = toCsvField(item.metadata.keywords.join(', '));
-  const cat = toCsvField(item.metadata.category);
-  const rel = toCsvField(item.metadata.releases || '');
-  const desc = toCsvField(item.metadata.description);
+  // Use primary keywords (around 49) as tags
+  const tags = toCsvField(item.metadata.keywords.slice(0, 49).join(', '));
+  // Use backup keywords as suggestions (if available)
+  const suggestions = toCsvField((item.metadata.backupKeywords || []).join(', '));
 
-  if (preset === PlatformPreset.GETTY) return `${fn},${title},${kws},${desc}`;
-  if (preset === PlatformPreset.ADOBE) return `${fn},${title},${kws},${cat},${rel}`;
-  return `${fn},${title},${kws},${cat},${rel},${desc}`;
+  // Simplified CSV: Filename, Title, Tags, Suggestions
+  return `${fn},${title},${tags},${suggestions}`;
 };
 
 export const generateCsvContent = (files: FileItem[], preset: PlatformPreset = PlatformPreset.STANDARD): string => {
-  let headers: string[] = [];
-  switch(preset) {
-    case PlatformPreset.GETTY: headers = ['Filename', 'Title', 'Keywords', 'Description']; break;
-    case PlatformPreset.ADOBE: headers = ['Filename', 'Title', 'Keywords', 'Category', 'Releases']; break;
-    default: headers = ['Filename', 'Title', 'Keywords', 'Category', 'Releases', 'Description'];
-  }
+  // Simplified CSV headers: Filename, Title, Tags, Suggestions
+  const headers = ['Filename', 'Title', 'Tags', 'Suggestions'];
   
   const rows = files.map(item => generateCsvRow(item, preset));
   return [headers.join(','), ...rows].join('\n');
