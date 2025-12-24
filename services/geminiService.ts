@@ -535,10 +535,21 @@ Return ONLY the JSON object.` }
           if (isRateLimit) {
             // Extract retry-after time from error message (e.g., "Please retry in 8.431675204s")
             let retryAfterSeconds = 60; // Default 60 seconds (more conservative)
-            const retryMatch = errMsg.match(/retry in ([\d.]+)s/i);
-            if (retryMatch && retryMatch[1]) {
-              retryAfterSeconds = Math.ceil(parseFloat(retryMatch[1])) + 5; // Add 5 seconds buffer
-              console.log(`Extracted retry time: ${retryMatch[1]}s, waiting ${retryAfterSeconds}s`);
+            // Try multiple regex patterns to catch different formats
+            const retryPatterns = [
+              /retry in ([\d.]+)s/i,
+              /retry.*?([\d.]+)\s*s/i,
+              /wait.*?([\d.]+)\s*s/i,
+              /([\d.]+)\s*seconds?/i
+            ];
+            
+            for (const pattern of retryPatterns) {
+              const retryMatch = errMsg.match(pattern);
+              if (retryMatch && retryMatch[1]) {
+                retryAfterSeconds = Math.ceil(parseFloat(retryMatch[1])) + 5; // Add 5 seconds buffer
+                console.log(`Extracted retry time: ${retryMatch[1]}s, waiting ${retryAfterSeconds}s`);
+                break;
+              }
             }
             
             // Also check Retry-After header if available
@@ -737,10 +748,21 @@ Return ONLY the JSON object.` }
         if (isRateLimit) {
           // Extract retry-after time from error message
           let retryAfterSeconds = 60; // Default 60 seconds (more conservative)
-          const retryMatch = errMsg.match(/retry in ([\d.]+)s/i);
-          if (retryMatch && retryMatch[1]) {
-            retryAfterSeconds = Math.ceil(parseFloat(retryMatch[1])) + 5; // Add 5 seconds buffer
-            console.log(`Extracted retry time: ${retryMatch[1]}s, waiting ${retryAfterSeconds}s`);
+          // Try multiple regex patterns to catch different formats
+          const retryPatterns = [
+            /retry in ([\d.]+)s/i,
+            /retry.*?([\d.]+)\s*s/i,
+            /wait.*?([\d.]+)\s*s/i,
+            /([\d.]+)\s*seconds?/i
+          ];
+          
+          for (const pattern of retryPatterns) {
+            const retryMatch = errMsg.match(pattern);
+            if (retryMatch && retryMatch[1]) {
+              retryAfterSeconds = Math.ceil(parseFloat(retryMatch[1])) + 5; // Add 5 seconds buffer
+              console.log(`Extracted retry time: ${retryMatch[1]}s, waiting ${retryAfterSeconds}s`);
+              break;
+            }
           }
           
           lastError = e;
