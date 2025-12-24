@@ -45,20 +45,40 @@ const METADATA_SCHEMA = {
   required: ["title", "description", "keywordsWithScores", "backupKeywords", "category", "rejectionRisks"],
 };
 
+// Models ordered by free tier access (best first)
+// Try models with better free tier limits first
+const AVAILABLE_MODELS = [
+  'gemini-1.5-flash-latest',  // Good free tier, fast
+  'gemini-1.5-flash',          // Stable version
+  'gemini-1.5-pro-latest',    // Better quality, may have different limits
+  'gemini-1.5-pro',           // Stable pro version
+];
+
 export class GeminiService {
+  private getBestModel(): string {
+    // Return the model with best free tier access
+    // Currently gemini-1.5-flash-latest has good free tier limits
+    return AVAILABLE_MODELS[0];
+  }
+
   async testKey(apiKey: string): Promise<boolean> {
-    try {
-      const ai = new GoogleGenAI({ apiKey });
-      const response = await ai.models.generateContent({
-        model: 'gemini-1.5-flash-latest',
-        contents: { parts: [{ text: 'test' }] },
-      });
-      // If we get a response, the key is valid
-      return !!response;
-    } catch (e) {
-      // Key is invalid or there was an error
-      return false;
+    // Try models in order until one works
+    for (const model of AVAILABLE_MODELS) {
+      try {
+        const ai = new GoogleGenAI({ apiKey });
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: { parts: [{ text: 'test' }] },
+        });
+        // If we get a response, the key is valid with this model
+        return !!response;
+      } catch (e) {
+        // Try next model
+        continue;
+      }
     }
+    // No model worked
+    return false;
   }
 
   async generateMetadata(
@@ -103,35 +123,63 @@ export class GeminiService {
       promptParts.push({ inlineData: { data: data.base64, mimeType: data.mimeType } });
     }
 
-    try {
-      const response = await ai.models.generateContent({
-        model: 'gemini-1.5-flash-latest',
-        contents: { parts: promptParts },
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: METADATA_SCHEMA
+    // Try models in order, starting with the one with best free tier access
+    let lastError: any = null;
+    for (const model of AVAILABLE_MODELS) {
+      try {
+        const response = await ai.models.generateContent({
+          model: model,
+          contents: { parts: promptParts },
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: METADATA_SCHEMA
+          }
+        });
+
+        const jsonStr = response.text || '{}';
+        const json = JSON.parse(jsonStr);
+        const keywords = (json.keywordsWithScores || []).map((k: any) => k.word.toLowerCase().trim()).filter(Boolean);
+        const backupKeywords = (json.backupKeywords || []).map((k: string) => k.toLowerCase().trim()).filter(Boolean);
+
+        return {
+          title: json.title || "Untitled Stock Asset",
+          description: json.description || "",
+          keywords: keywords.slice(0, 50),
+          backupKeywords: backupKeywords,
+          keywordScores: json.keywordsWithScores || [],
+          rejectionRisks: json.rejectionRisks || [],
+          category: json.category || "General",
+          releases: ""
+        };
+      } catch (e: any) {
+        const errMsg = e.message || '';
+        const statusCode = e.status || e.statusCode || '';
+        
+        // If it's a rate limit error, try next model
+        const isRateLimit = statusCode === 429 || 
+          errMsg.includes('429') || 
+          errMsg.toLowerCase().includes('quota') || 
+          errMsg.toLowerCase().includes('rate limit') ||
+          errMsg.toLowerCase().includes('too many requests');
+        
+        // If it's a model not found error, try next model
+        const isModelNotFound = errMsg.toLowerCase().includes('not found') || 
+          errMsg.toLowerCase().includes('invalid model');
+        
+        if (isRateLimit || isModelNotFound) {
+          lastError = e;
+          continue; // Try next model
         }
-      });
-
-      const jsonStr = response.text || '{}';
-      const json = JSON.parse(jsonStr);
-      const keywords = (json.keywordsWithScores || []).map((k: any) => k.word.toLowerCase().trim()).filter(Boolean);
-      const backupKeywords = (json.backupKeywords || []).map((k: string) => k.toLowerCase().trim()).filter(Boolean);
-
-      return {
-        title: json.title || "Untitled Stock Asset",
-        description: json.description || "",
-        keywords: keywords.slice(0, 50),
-        backupKeywords: backupKeywords,
-        keywordScores: json.keywordsWithScores || [],
-        rejectionRisks: json.rejectionRisks || [],
-        category: json.category || "General",
-        releases: ""
-      };
-    } catch (e: any) {
-      const errMsg = e.message || '';
-      const statusCode = e.status || e.statusCode || '';
-      // Check for 429 rate limit errors
+        
+        // Other errors, throw immediately
+        throw e;
+      }
+    }
+    
+    // All models failed, throw the last error
+    if (lastError) {
+      const errMsg = lastError.message || '';
+      const statusCode = lastError.status || lastError.statusCode || '';
       if (statusCode === 429 || 
           errMsg.includes('429') || 
           errMsg.toLowerCase().includes('quota') || 
@@ -139,8 +187,10 @@ export class GeminiService {
           errMsg.toLowerCase().includes('too many requests')) {
         throw new QuotaExceededInternal();
       }
-      throw e;
+      throw lastError;
     }
+    
+    throw new Error('No models available');
   }
 }
 
