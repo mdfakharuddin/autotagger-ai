@@ -462,13 +462,24 @@ function App() {
       } : f));
     } catch (e: any) {
       const isRateLimit = e instanceof QuotaExceededInternal || 
-                         (e.message && (e.message.includes('429') || e.message.toLowerCase().includes('quota') || e.message.toLowerCase().includes('rate limit')));
+                         (e.message && (e.message.includes('429') || 
+                          e.message.toLowerCase().includes('quota') || 
+                          e.message.toLowerCase().includes('rate limit') ||
+                          e.message.toLowerCase().includes('quota limit')));
       
       if (isRateLimit) {
         // Re-queue the file for later processing
         setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.PENDING } : f));
+        // Show helpful message about quota
+        if (apiKeys.length > 0) {
+          setToast({ 
+            message: "Quota limit reached. Files will be processed when quota resets. You can manually reset quota in Settings.", 
+            type: "error" 
+          });
+        }
       } else {
-        setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: "Analysis failed." } : f));
+        const errorMsg = e.message || "Analysis failed.";
+        setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.ERROR, error: errorMsg } : f));
       }
     } finally {
       activeProcessingIds.current.delete(item.id);

@@ -1,5 +1,4 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
 import { Metadata, GenerationProfile, StyleMemory } from '../types';
 
 export class QuotaExceededInternal extends Error {
@@ -9,36 +8,39 @@ export class QuotaExceededInternal extends Error {
   }
 }
 
+// Use REST API directly instead of SDK to avoid v1beta endpoint issues
+const API_BASE_URL = 'https://generativelanguage.googleapis.com/v1';
+
 const METADATA_SCHEMA = {
-  type: Type.OBJECT,
+  type: "object",
   properties: {
-    title: { type: Type.STRING, description: "SEO-optimized title, max 180 chars." },
-    description: { type: Type.STRING, description: "Detailed descriptive text for stock metadata." },
+    title: { type: "string", description: "SEO-optimized title, max 180 chars." },
+    description: { type: "string", description: "Detailed descriptive text for stock metadata." },
     keywordsWithScores: {
-      type: Type.ARRAY,
+      type: "array",
       items: {
-        type: Type.OBJECT,
+        type: "object",
         properties: {
-          word: { type: Type.STRING },
-          score: { type: Type.STRING, description: "strong, medium, or weak" },
-          specificity: { type: Type.INTEGER, description: "Score 0-100 for niche accuracy" },
-          demand: { type: Type.INTEGER, description: "Estimated search volume 0-100" },
-          platformFit: { type: Type.INTEGER, description: "Suitability for stock platform indexing 0-100" },
-          reason: { type: Type.STRING, description: "Short justification for the score" }
+          word: { type: "string" },
+          score: { type: "string", description: "strong, medium, or weak" },
+          specificity: { type: "integer", description: "Score 0-100 for niche accuracy" },
+          demand: { type: "integer", description: "Estimated search volume 0-100" },
+          platformFit: { type: "integer", description: "Suitability for stock platform indexing 0-100" },
+          reason: { type: "string", description: "Short justification for the score" }
         },
         required: ["word", "score", "specificity", "demand", "platformFit"]
       },
       description: "Exactly 50 high-priority keywords. First 10 MUST be primary subjects."
     },
     backupKeywords: {
-      type: Type.ARRAY,
-      items: { type: Type.STRING },
+      type: "array",
+      items: { type: "string" },
       description: "20 additional relevant keywords as a suggestion pool."
     },
-    category: { type: Type.STRING, description: "Industry standard stock category name." },
+    category: { type: "string", description: "Industry standard stock category name." },
     rejectionRisks: {
-      type: Type.ARRAY,
-      items: { type: Type.STRING },
+      type: "array",
+      items: { type: "string" },
       description: "Potential trademark, quality or policy issues."
     }
   },
@@ -46,15 +48,12 @@ const METADATA_SCHEMA = {
 };
 
 // Models ordered by free tier access (best first)
-// Try models with better free tier limits first
-// Using correct model identifiers for @google/genai SDK
-// The SDK expects just the model name, not the full path
+// Using v1 API endpoint with correct model names
 const AVAILABLE_MODELS = [
-  'gemini-1.5-flash',        // Most stable and widely available
-  'gemini-1.5-flash-001',    // Specific version if available
-  'gemini-1.5-pro',          // Pro version
-  'gemini-pro',              // Older stable model
-  'gemini-1.0-pro',         // Version 1.0 fallback
+  'gemini-1.5-flash',        // Most widely available with good free tier
+  'gemini-1.5-flash-latest', // Latest version
+  'gemini-1.5-pro',         // Pro version
+  'gemini-pro',              // Legacy model
 ];
 
 export class GeminiService {
@@ -65,18 +64,45 @@ export class GeminiService {
   }
 
   async testKey(apiKey: string): Promise<boolean> {
-    // Try models in order until one works
+    // Try models in order until one works using REST API
     for (const model of AVAILABLE_MODELS) {
       try {
-        const ai = new GoogleGenAI({ apiKey });
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: { parts: [{ text: 'test' }] },
+        const response = await fetch(`${API_BASE_URL}/models/${model}:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: [{ text: 'test' }]
+            }]
+          })
         });
-        // If we get a response, the key is valid with this model
-        return !!response;
-      } catch (e) {
+
+        if (response.ok) {
+          return true;
+        }
+
+        const errorData = await response.json().catch(() => ({}));
+        const statusCode = response.status;
+        const errMsg = errorData.error?.message || '';
+
+        // If it's a quota/rate limit error, don't try other models
+        const isQuotaError = statusCode === 429 || 
+          errMsg.toLowerCase().includes('quota') || 
+          errMsg.toLowerCase().includes('rate limit') ||
+          errMsg.toLowerCase().includes('too many requests');
+        
+        if (isQuotaError) {
+          return false;
+        }
+
+        // Log the error for debugging
+        console.warn(`Model ${model} failed:`, statusCode, errMsg);
         // Try next model
+        continue;
+      } catch (e: any) {
+        console.warn(`Model ${model} error:`, e.message || e);
         continue;
       }
     }
@@ -91,8 +117,6 @@ export class GeminiService {
     styleMemory: StyleMemory,
     isVariant: boolean = false
   ): Promise<Metadata> {
-    const ai = new GoogleGenAI({ apiKey });
-    
     const memoryInstruction = styleMemory.rejectedKeywords.length > 0 
       ? `Avoid these previously rejected terms: [${styleMemory.rejectedKeywords.slice(-20).join(', ')}].`
       : "";
@@ -130,16 +154,55 @@ export class GeminiService {
     let lastError: any = null;
     for (const model of AVAILABLE_MODELS) {
       try {
-        const response = await ai.models.generateContent({
-          model: model,
-          contents: { parts: promptParts },
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: METADATA_SCHEMA
-          }
+        const response = await fetch(`${API_BASE_URL}/models/${model}:generateContent?key=${apiKey}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            contents: [{
+              parts: promptParts
+            }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: METADATA_SCHEMA
+            }
+          })
         });
 
-        const jsonStr = response.text || '{}';
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({}));
+          const errMsg = errorData.error?.message || '';
+          const statusCode = response.status;
+          
+          // If it's a rate limit error, try next model
+          const isRateLimit = statusCode === 429 || 
+            errMsg.includes('429') || 
+            errMsg.toLowerCase().includes('quota') || 
+            errMsg.toLowerCase().includes('rate limit') ||
+            errMsg.toLowerCase().includes('too many requests') ||
+            errMsg.toLowerCase().includes('quota exceeded');
+          
+          // 404 can mean model not found OR quota exceeded (API key disabled)
+          const isModelNotFound = statusCode === 404 || 
+            errMsg.toLowerCase().includes('not found') || 
+            errMsg.toLowerCase().includes('invalid model') ||
+            errMsg.toLowerCase().includes('404') ||
+            errMsg.toLowerCase().includes('permission denied') ||
+            errMsg.toLowerCase().includes('api key not valid');
+          
+          if (isRateLimit || isModelNotFound) {
+            lastError = { message: errMsg, status: statusCode, statusCode };
+            console.warn(`Model ${model} unavailable (${isRateLimit ? 'rate limit' : 'not found/disabled'}), trying next...`);
+            continue; // Try next model
+          }
+          
+          // Other errors, throw immediately
+          throw new Error(errMsg || `HTTP ${statusCode}`);
+        }
+
+        const responseData = await response.json();
+        const jsonStr = responseData.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
         const json = JSON.parse(jsonStr);
         const keywords = (json.keywordsWithScores || []).map((k: any) => k.word.toLowerCase().trim()).filter(Boolean);
         const backupKeywords = (json.backupKeywords || []).map((k: string) => k.toLowerCase().trim()).filter(Boolean);
@@ -163,14 +226,20 @@ export class GeminiService {
           errMsg.includes('429') || 
           errMsg.toLowerCase().includes('quota') || 
           errMsg.toLowerCase().includes('rate limit') ||
-          errMsg.toLowerCase().includes('too many requests');
+          errMsg.toLowerCase().includes('too many requests') ||
+          errMsg.toLowerCase().includes('quota exceeded');
         
-        // If it's a model not found error, try next model
-        const isModelNotFound = errMsg.toLowerCase().includes('not found') || 
-          errMsg.toLowerCase().includes('invalid model');
+        // 404 can mean model not found OR quota exceeded (API key disabled)
+        const isModelNotFound = statusCode === 404 || 
+          errMsg.toLowerCase().includes('not found') || 
+          errMsg.toLowerCase().includes('invalid model') ||
+          errMsg.toLowerCase().includes('404') ||
+          errMsg.toLowerCase().includes('permission denied') ||
+          errMsg.toLowerCase().includes('api key not valid');
         
         if (isRateLimit || isModelNotFound) {
           lastError = e;
+          console.warn(`Model ${model} unavailable (${isRateLimit ? 'rate limit' : 'not found/disabled'}), trying next...`);
           continue; // Try next model
         }
         
@@ -179,21 +248,40 @@ export class GeminiService {
       }
     }
     
-    // All models failed, throw the last error
+    // All models failed
     if (lastError) {
       const errMsg = lastError.message || '';
       const statusCode = lastError.status || lastError.statusCode || '';
-      if (statusCode === 429 || 
+      
+      // Check for quota/rate limit errors first (including 404 that might be quota-related)
+      const isQuotaError = statusCode === 429 || 
           errMsg.includes('429') || 
           errMsg.toLowerCase().includes('quota') || 
           errMsg.toLowerCase().includes('rate limit') ||
-          errMsg.toLowerCase().includes('too many requests')) {
+          errMsg.toLowerCase().includes('too many requests') ||
+          errMsg.toLowerCase().includes('quota exceeded') ||
+          errMsg.toLowerCase().includes('billing') ||
+          errMsg.toLowerCase().includes('permission denied');
+      
+      // 404 can also mean quota exceeded if API key was disabled
+      const is404Quota = (statusCode === 404 || errMsg.toLowerCase().includes('404')) && 
+                         (errMsg.toLowerCase().includes('api key') || 
+                          errMsg.toLowerCase().includes('disabled') ||
+                          errMsg.toLowerCase().includes('not valid'));
+      
+      if (isQuotaError || is404Quota) {
         throw new QuotaExceededInternal();
       }
+      
+      // Check if all models returned 404 - could be quota or access issue
+      if (statusCode === 404 || errMsg.toLowerCase().includes('404') || errMsg.toLowerCase().includes('not found')) {
+        throw new Error('API key may have reached quota limit or been disabled. Please check your Google Cloud Console for quota status, enable billing if needed, or try resetting your API key quota in Settings.');
+      }
+      
       throw lastError;
     }
     
-    throw new Error('No models available');
+    throw new Error('No models available. Please verify your API key has access to Gemini models.');
   }
 }
 
