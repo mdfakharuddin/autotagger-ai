@@ -1075,14 +1075,41 @@ function App() {
         return requestCount < limit;
       });
       
-      // Process files one at a time to strictly respect rate limits
-      // Even with multiple keys, process sequentially to avoid 429 errors
-      if (activeKeys.length > 0 && processingCount === 0) {
-        const pending = files.filter(f => f.status === ProcessingStatus.PENDING);
-        const nextFile = pending.find(f => !activeProcessingIds.current.has(f.id));
-        if (nextFile) {
-          processFile(nextFile);
+      // Process files in parallel - one per available API+model combination
+      const availableCombinations = workingApiModels.filter(w => !w.inUse);
+      const pending = files.filter(f => f.status === ProcessingStatus.PENDING && !activeProcessingIds.current.has(f.id));
+      
+      // Process up to as many files as we have available API+model combinations
+      const filesToProcess = Math.min(availableCombinations.length, pending.length);
+      
+      for (let i = 0; i < filesToProcess; i++) {
+        const file = pending[i];
+        if (file) {
+          processFile(file);
         }
+      }
+      
+      // If we have more pending files than available combinations, test for more in background
+      if (pending.length > availableCombinations.length && !isTestingApis && availableCombinations.length < apiKeys.length) {
+        // Test more API+model combinations in background
+        testAllApiModelCombinations(true).catch(() => {
+          // Silent fail for background testing
+        });
+      }
+      
+      // Background recovery: if all APIs exhausted, keep testing
+      if (allApisExhausted && !isTestingApis) {
+        testAllApiModelCombinations(true).then(() => {
+          setWorkingApiModels(prev => {
+            if (prev.length > 0) {
+              setAllApisExhausted(false);
+              setToast({ message: "API recovered! Resuming processing...", type: "success" });
+            }
+            return prev;
+          });
+        }).catch(() => {
+          // Still exhausted
+        });
       }
     }, 1000);
 
