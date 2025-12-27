@@ -402,14 +402,33 @@ function App() {
     if (activeProcessingIds.current.has(item.id)) return;
     
     // STRICT ENFORCEMENT: Must have a working API+model combination available
-    const apiModelCombo = getNextAvailableApiModel();
-    if (!apiModelCombo) {
+    // OR: If workingApiModels.length === 0, allow one file to discover first API
+    let apiModelCombo = getNextAvailableApiModel();
+    let currentKeySlot = null;
+    let currentModel = styleMemory.selectedModel || 'auto';
+    
+    // If no working combos yet, try to get an available key slot for discovery
+    if (!apiModelCombo && workingApiModels.length === 0) {
+      currentKeySlot = getNextAvailableKeySlot();
+      if (!currentKeySlot) {
+        // No available API keys at all - do NOT process
+        return;
+      }
+      // Will discover model during processing
+    } else if (!apiModelCombo) {
       // No available combinations - do NOT process
       return;
+    } else {
+      // Use the reserved combo
+      currentKeySlot = apiKeys.find(k => k.id === apiModelCombo!.apiKeyId);
+      if (!currentKeySlot) {
+        return; // API key was removed
+      }
+      currentModel = apiModelCombo.model;
     }
 
     // STRICT ENFORCEMENT: Reserve slot BEFORE marking as processing
-    // This ensures activeProcessingIds.size <= workingApiModels.length
+    // This ensures activeProcessingIds.size <= max(workingApiModels.length, 1)
     activeProcessingIds.current.add(item.id);
     
     try {
@@ -452,19 +471,35 @@ function App() {
         payload = { base64: await readFileAsBase64ForAPI(processingFile), mimeType: processingFile.type };
       }
 
-      // Use the reserved API+model combination
-      const currentKeySlot = apiKeys.find(k => k.id === apiModelCombo.apiKeyId);
+      // Use the API key and model (either from reserved combo or discovery mode)
       if (!currentKeySlot) {
         // API key was removed - release slot and abort
         activeProcessingIds.current.delete(item.id);
         setProcessingCount(p => Math.max(0, p - 1));
-        releaseApiModel(apiModelCombo.apiKeyId, apiModelCombo.model);
+        if (apiModelCombo) {
+          releaseApiModel(apiModelCombo.apiKeyId, apiModelCombo.model);
+        }
         setFiles(prev => prev.map(f => f.id === item.id ? { ...f, status: ProcessingStatus.PENDING } : f));
         return;
       }
       
-      const currentModel = apiModelCombo.model;
       const apiKey = currentKeySlot.key;
+      
+      // If in discovery mode (no apiModelCombo), determine model to use
+      if (!apiModelCombo) {
+        // Try to get available models for this API key
+        let availableModels: string[] = [];
+        try {
+          availableModels = await geminiService.listAvailableModels(apiKey);
+        } catch (err) {
+          availableModels = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+        }
+        
+        // Use selected model if available, otherwise use first available
+        if (currentModel === 'auto' || !availableModels.includes(currentModel)) {
+          currentModel = availableModels[0] || 'gemini-2.5-flash';
+        }
+      }
       
       // STRICT 1:1 MAPPING: Use ONLY the reserved API+model combination
       // Do NOT switch to other combos - if this one fails, remove it and re-queue
@@ -689,81 +724,33 @@ function App() {
       setProcessingCount(p => Math.max(0, p - 1));
       
       // Release API+model combination (mark as not in use)
+      // If we discovered a new combo, it was already added to workingApiModels with inUse=true
+      // So we need to release it
       if (apiModelCombo) {
         releaseApiModel(apiModelCombo.apiKeyId, apiModelCombo.model);
+      } else if (currentKeySlot) {
+        // Discovery mode: release the combo we just added
+        releaseApiModel(currentKeySlot.id, currentModel);
       }
     }
   }, [currentProfile, styleMemory, getNextAvailableKeySlot, updateKeySlotTiming, apiKeys, getNextAvailableApiModel, releaseApiModel]);
 
-  // Test all API+model combinations to find working ones (runs in background)
-  // NOTE: This function ONLY tests - it does NOT add to workingApiModels.
-  // workingApiModels is ONLY updated when a REAL metadata request succeeds in processFile.
+  // REMOVED: testAllApiModelCombinations
+  // Testing APIs with generateContent consumes quota and causes 429 errors.
+  // Instead, we use passive discovery: workingApiModels is populated ONLY
+  // when real metadata requests succeed in processFile.
+  // This ensures zero API calls on queue start and zero 429s from testing.
   const testAllApiModelCombinations = useCallback(async (background: boolean = false) => {
-    if (apiKeys.length === 0) return;
-    
+    // NO-OP: Do not test APIs. Let real processing discover working combinations.
+    // This prevents quota consumption and 429 errors during testing.
     if (!background) {
-      setToast({ message: "Testing API keys and models...", type: "success" });
-      setIsTestingApis(true);
+      setToast({ 
+        message: "Queue started. APIs will be discovered as files are processed.", 
+        type: "success" 
+      });
     }
-    
-    const results = new Map<string, { apiKeyId: string; model: string; works: boolean }>();
-    
-    // Get available models for first API key (they should be similar across keys)
-    let availableModels: string[] = [];
-    try {
-      availableModels = await geminiService.listAvailableModels(apiKeys[0].key);
-    } catch (e) {
-      console.warn('Failed to list models:', e);
-      // Use fallback models
-      availableModels = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
-    }
-    
-    // Test each API key with each model in parallel batches
-    const testPromises: Promise<void>[] = [];
-    
-    for (const apiKey of apiKeys) {
-      for (const model of availableModels) {
-        const key = `${apiKey.id}:${model}`;
-        // Skip if already tested
-        const existing = apiModelTestResults.get(key);
-        if (existing) {
-          results.set(key, existing);
-          continue;
-        }
-        
-        // Test in parallel (but do NOT add to workingApiModels - only real requests do that)
-        testPromises.push(
-          geminiService.testApiModelCombination(apiKey.key, model)
-            .then(works => {
-              results.set(key, { apiKeyId: apiKey.id, model, works });
-            })
-            .catch(() => {
-              results.set(key, { apiKeyId: apiKey.id, model, works: false });
-            })
-        );
-      }
-    }
-    
-    // Wait for all tests to complete
-    await Promise.all(testPromises);
-    
-    // Store test results (but do NOT add to workingApiModels)
-    setApiModelTestResults(results);
     setIsTestingApis(false);
-    
-    // Check if we have any working combinations (from real requests, not tests)
-    if (workingApiModels.length === 0) {
-      setAllApisExhausted(true);
-      if (!background) {
-        setToast({ 
-          message: "No working API+model combinations found. Processing will start when APIs become available.", 
-          type: "error" 
-        });
-      }
-    } else {
-      setAllApisExhausted(false);
-    }
-  }, [apiKeys, apiModelTestResults, workingApiModels]);
+  }, []);
 
   const handleSelectFolder = async () => {
     try {
@@ -1082,12 +1069,8 @@ function App() {
     
     const tick = setInterval(() => {
       // STRICT CONCURRENCY ENFORCEMENT: Capacity based ONLY on workingApiModels.length
-      const maxConcurrent = workingApiModels.length;
-      
-      // If no working APIs, stop processing immediately
-      if (maxConcurrent === 0) {
-        return;
-      }
+      // BUT: Allow 1 file to process when workingApiModels.length === 0 to discover first API
+      const maxConcurrent = workingApiModels.length === 0 ? 1 : workingApiModels.length;
       
       // Calculate available slots (strict enforcement)
       const availableSlots = maxConcurrent - activeProcessingIds.current.size;
@@ -1111,12 +1094,8 @@ function App() {
         processFile(file);
       }
       
-      // Background recovery: if all APIs exhausted, keep testing
-      if (allApisExhausted && !isTestingApis && workingApiModels.length === 0) {
-        testAllApiModelCombinations(true).catch(() => {
-          // Silent fail for background testing
-        });
-      }
+      // No background testing - APIs are discovered through real processing only
+      // This prevents 429 errors and quota consumption from testing
     }, 1000);
 
     return () => clearInterval(tick);
@@ -1191,13 +1170,14 @@ function App() {
             return;
           }
           
-          // Test API+model combinations (but don't add to workingApiModels - only real requests do that)
-          setToast({ message: "Testing API keys and models...", type: "success" });
-          await testAllApiModelCombinations();
-          
-          // Note: workingApiModels will be populated as files are processed and succeed
-          // We start the queue even if workingApiModels.length === 0 - it will wait for first success
+          // NO TESTING: Start queue immediately. APIs will be discovered through real processing.
+          // This ensures zero API calls on start and zero 429 errors from testing.
+          // workingApiModels will be populated as files are processed and succeed.
           setIsQueueActive(true);
+          setToast({ 
+            message: "Queue started. Processing will begin as APIs become available.", 
+            type: "success" 
+          });
         }}
         onStopQueue={() => setIsQueueActive(false)}
         onExport={async (p) => {
