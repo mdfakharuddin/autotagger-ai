@@ -61,7 +61,7 @@ export const getVideoFrames = (file: File): Promise<{ previewUrl: string, frames
     if (typeof window === 'undefined') return reject('Not in browser');
     
     const video = document.createElement('video');
-    video.preload = 'auto';
+    video.preload = 'metadata'; // Changed to metadata for faster initial load
     video.muted = true;
     video.playsInline = true;
     const objectUrl = URL.createObjectURL(file);
@@ -74,6 +74,12 @@ export const getVideoFrames = (file: File): Promise<{ previewUrl: string, frames
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
     let isResolved = false;
     let dimensionRetryCount = 0;
+    let seekAttemptCount = 0;
+    const maxSeekAttempts = 3;
+    
+    // Adaptive timeout based on file size: 90s base + 2s per 10MB, max 5 minutes for very large files
+    const fileSizeMB = file.size / (1024 * 1024);
+    const timeoutDuration = Math.min(90000 + (fileSizeMB * 2000), 300000); // Max 5 minutes for very large files
     
     const cleanup = () => {
       if (timeoutId) {
@@ -129,37 +135,31 @@ export const getVideoFrames = (file: File): Promise<{ previewUrl: string, frames
     const captureFrame = () => {
       if (video.videoWidth === 0 || video.videoHeight === 0) {
         dimensionRetryCount++;
-        if (dimensionRetryCount > 10) {
+        if (dimensionRetryCount > 30) { // Increased retries for large files
           cleanup();
           reject(new Error("Video dimensions not available after retries"));
           return;
         }
-        // Retry after a delay with exponential backoff
+        // Retry after a delay with exponential backoff, longer for large files
+        const baseDelay = fileSizeMB > 100 ? 500 : 300;
         setTimeout(() => {
           if (!isResolved) {
             captureFrame();
           }
-        }, Math.min(300 * dimensionRetryCount, 2000));
+        }, Math.min(baseDelay * dimensionRetryCount, 5000));
         return;
       }
       
       proceedCapture();
     };
     
-    const proceedWithCapture = () => {
-      const duration = video.duration;
+    let tryNextFallback: (() => void) | null = null;
+    
+    const tryCaptureAtTime = (targetTime: number) => {
+      if (isResolved) return;
       
-      // Check if video is valid
-      if (!duration || duration === 0 || isNaN(duration)) {
-        cleanup();
-        reject(new Error("Video duration not available"));
-        return;
-      }
-      
-      // Optimized: Use single representative frame to reduce API payload
-      const framePoints: number[] = [duration * 0.3]; // Capture at 30%
-
       video.onseeked = () => {
+        if (isResolved) return;
         // Small delay to ensure frame is decoded, with retry logic
         let seekRetryCount = 0;
         const tryCapture = () => {
@@ -168,23 +168,99 @@ export const getVideoFrames = (file: File): Promise<{ previewUrl: string, frames
             captureFrame();
           } else {
             seekRetryCount++;
-            if (seekRetryCount < 10) {
-              setTimeout(tryCapture, 200);
+            const maxSeekRetries = fileSizeMB > 100 ? 25 : 15; // More retries for large files
+            const seekDelay = fileSizeMB > 100 ? 500 : 300; // Longer delay for large files
+            if (seekRetryCount < maxSeekRetries) {
+              setTimeout(tryCapture, seekDelay);
             } else {
-              cleanup();
-              reject(new Error("Video frame not ready after seek"));
+              // Try next fallback time
+              if (tryNextFallback) {
+                tryNextFallback();
+              }
             }
           }
         };
-        setTimeout(tryCapture, 200);
+        const initialDelay = fileSizeMB > 100 ? 500 : 300;
+        setTimeout(tryCapture, initialDelay);
       };
-
-      // Start capturing first frame
-      video.currentTime = framePoints[0];
+      
+      try {
+        video.currentTime = targetTime;
+      } catch (e) {
+        if (tryNextFallback) {
+          tryNextFallback();
+        }
+      }
+    };
+    
+    const proceedWithCapture = () => {
+      const duration = video.duration;
+      
+      // First, try to capture at current position without seeking (fastest)
+      if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+        // Video is already loaded and has dimensions, try capturing immediately
+        try {
+          captureFrame();
+          return; // Success, exit early
+        } catch (e) {
+          // If immediate capture fails, continue with seeking approach
+        }
+      }
+      
+      // Check if video is valid
+      if (!duration || duration === 0 || isNaN(duration)) {
+        // If no duration but we have dimensions, try capturing anyway
+        if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+          captureFrame();
+          return;
+        }
+        cleanup();
+        reject(new Error("Video duration not available"));
+        return;
+      }
+      
+      // Try different time points: start (0s), then 10%, then 30%
+      const timePoints = [0, duration * 0.1, duration * 0.3];
+      
+      tryNextFallback = () => {
+        if (isResolved) return;
+        seekAttemptCount++;
+        
+        if (seekAttemptCount >= timePoints.length) {
+          // All attempts failed, try to capture at current time as last resort
+          if (video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+            captureFrame();
+          } else {
+            cleanup();
+            reject(new Error("Video frame capture failed after all attempts"));
+          }
+          return;
+        }
+        
+        // Try next time point with longer delay for large files
+        const delay = fileSizeMB > 100 ? 1000 : 500; // Longer delay for files > 100MB
+        setTimeout(() => {
+          if (!isResolved) {
+            tryCaptureAtTime(timePoints[seekAttemptCount]);
+          }
+        }, delay);
+      };
+      
+      // Try capturing at the beginning first (fastest), then fallback to other times
+      seekAttemptCount = 0;
+      tryCaptureAtTime(timePoints[0]);
+    };
+    
+    video.onloadedmetadata = () => {
+      if (!isResolved && video.duration > 0 && !isNaN(video.duration)) {
+        proceedWithCapture();
+      }
     };
     
     video.onloadeddata = () => {
-      proceedWithCapture();
+      if (!isResolved) {
+        proceedWithCapture();
+      }
     };
 
     video.onerror = (e) => {
@@ -199,15 +275,22 @@ export const getVideoFrames = (file: File): Promise<{ previewUrl: string, frames
         proceedWithCapture();
       }
     };
+    
+    // Also try oncanplaythrough for more reliable loading
+    video.oncanplaythrough = () => {
+      if (!isResolved && video.duration > 0 && !isNaN(video.duration)) {
+        proceedWithCapture();
+      }
+    };
 
-    // Fail-safe timeout - increased for large videos (45 seconds)
+    // Adaptive timeout based on file size
     timeoutId = setTimeout(() => {
       if (!isResolved && frames.length === 0) {
         isResolved = true;
         cleanup();
         reject(new Error("Video frame capture timed out"));
       }
-    }, 45000); // Increased to 45s for very large videos
+    }, timeoutDuration);
   });
 };
 

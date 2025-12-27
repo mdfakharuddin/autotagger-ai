@@ -93,7 +93,43 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
         } catch (err) {
           setIsLoadingPreview(false);
           console.warn(`Video preview load failed (attempt ${retryCountRef.current + 1}):`, err);
-          scheduleRetry();
+          
+          // After 3 failed attempts, create a simple placeholder instead of retrying
+          if (retryCountRef.current >= 2) {
+            console.warn(`Video preview failed after ${retryCountRef.current + 1} attempts, using placeholder for ${item.fileName}`);
+            // Create a simple placeholder - a data URL with a video icon
+            const canvas = document.createElement('canvas');
+            canvas.width = 400;
+            canvas.height = 300;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+              // Fill with a gradient background
+              const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+              gradient.addColorStop(0, '#1e293b');
+              gradient.addColorStop(1, '#0f172a');
+              ctx.fillStyle = gradient;
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+              
+              // Add text
+              ctx.fillStyle = '#94a3b8';
+              ctx.font = 'bold 24px Arial';
+              ctx.textAlign = 'center';
+              ctx.textBaseline = 'middle';
+              ctx.fillText('Video', canvas.width / 2, canvas.height / 2 - 20);
+              ctx.font = '14px Arial';
+              ctx.fillText('Preview unavailable', canvas.width / 2, canvas.height / 2 + 20);
+              
+              const placeholderUrl = canvas.toDataURL('image/png');
+              setPreviewUrl(placeholderUrl);
+              setIsLoadingPreview(false);
+              hasLoadedRef.current = true; // Mark as loaded so we don't retry
+              onPreviewLoaded?.(item.id, placeholderUrl, file);
+            } else {
+              scheduleRetry();
+            }
+          } else {
+            scheduleRetry();
+          }
         }
       }
     } catch (err) {
@@ -112,16 +148,46 @@ const LazyFileCard: React.FC<LazyFileCardProps> = ({
     // Don't retry if already loaded
     if (hasLoadedRef.current && previewUrl) return;
     
-    // Limit retries to 10 attempts
-    if (retryCountRef.current >= 10) {
+    // Limit retries to 5 attempts (reduced from 10 since we create placeholder after 3)
+    if (retryCountRef.current >= 5) {
       console.warn(`Max retry attempts reached for file ${item.fileName}`);
+      // Create placeholder as last resort
+      if (!previewUrl) {
+        const canvas = document.createElement('canvas');
+        canvas.width = 400;
+        canvas.height = 300;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+          gradient.addColorStop(0, '#1e293b');
+          gradient.addColorStop(1, '#0f172a');
+          ctx.fillStyle = gradient;
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+          ctx.fillStyle = '#94a3b8';
+          ctx.font = 'bold 24px Arial';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText('Video', canvas.width / 2, canvas.height / 2 - 20);
+          ctx.font = '14px Arial';
+          ctx.fillText('Preview unavailable', canvas.width / 2, canvas.height / 2 + 20);
+          const placeholderUrl = canvas.toDataURL('image/png');
+          setPreviewUrl(placeholderUrl);
+          setIsLoadingPreview(false);
+          hasLoadedRef.current = true;
+        }
+      }
       return;
     }
     
     retryCountRef.current += 1;
     
-    // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s (max)
-    const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 30000);
+    // Exponential backoff with longer delays for video files: 2s, 4s, 8s, 16s, 30s (max)
+    // Videos need more time between retries
+    const baseDelay = item.fileName?.toLowerCase().endsWith('.mp4') || 
+                      item.fileName?.toLowerCase().endsWith('.mov') || 
+                      item.fileName?.toLowerCase().endsWith('.avi') || 
+                      item.fileName?.toLowerCase().endsWith('.webm') ? 2000 : 1000;
+    const delay = Math.min(baseDelay * Math.pow(2, retryCountRef.current - 1), 30000);
     
     retryTimeoutRef.current = setTimeout(() => {
       loadPreview(true);
