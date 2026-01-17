@@ -512,7 +512,7 @@ function App() {
       // Do NOT switch to other combos - if this one fails, remove it and re-queue
       let metadata;
       try {
-        metadata = await geminiService.generateMetadata(apiKey, payload, currentProfile, styleMemory, false, currentModel);
+        metadata = await geminiService.generateMetadata(apiKey, payload, currentProfile, styleMemory, false, currentModel, item.fileName);
         updateKeySlotTiming(currentKeySlot.id);
         
         // CRITICAL: Add to workingApiModels ONLY after REAL metadata request succeeds
@@ -1134,7 +1134,7 @@ function App() {
         ? { frames: item.base64Frames || [], mimeType: 'image/jpeg' }
         : { base64: await readFileAsBase64ForAPI(processingFile), mimeType: processingFile.type };
 
-      const variantMetadata = await geminiService.generateMetadata(keySlot.key, payload, currentProfile, styleMemory, true, styleMemory.selectedModel);
+      const variantMetadata = await geminiService.generateMetadata(keySlot.key, payload, currentProfile, styleMemory, true, styleMemory.selectedModel, item.fileName);
       updateKeySlotTiming(keySlot.id);
       setFiles(prev => prev.map(f => f.id === id ? { ...f, variantB: variantMetadata } : f));
     } catch (e: any) {
