@@ -74,7 +74,8 @@ function App() {
       const parsed = JSON.parse(mem);
       setStyleMemory({
         ...parsed,
-        selectedModel: parsed.selectedModel || 'auto' // Default to auto if not set
+        selectedModel: parsed.selectedModel || 'auto', // Default to auto if not set
+        selectedProvider: parsed.selectedProvider || AIProvider.LOCAL_PROXY, // Default to Proxy if not set
       });
     }
 

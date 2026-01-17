@@ -368,14 +368,14 @@ Return ONLY the JSON object.` }
           throw new Error(`Proxy error: ${response.status} ${response.statusText}`);
         }
 
-        const data = await response.json();
+        const proxyData = await response.json();
         
-        if (!data.success) {
-          throw new Error(data.error || 'Unknown proxy error');
+        if (!proxyData.success) {
+          throw new Error(proxyData.error || 'Unknown proxy error');
         }
 
         // Parse the Markdown/JSON response from the proxy
-        let jsonStr = data.response;
+        let jsonStr = proxyData.response;
         jsonStr = this.extractJsonFromResponse(jsonStr);
         let json: any;
         
