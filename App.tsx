@@ -489,17 +489,22 @@ function App() {
       
       // If in discovery mode (no apiModelCombo), determine model to use
       if (!apiModelCombo) {
-        // Try to get available models for this API key
-        let availableModels: string[] = [];
-        try {
-          availableModels = await geminiService.listAvailableModels(apiKey);
-        } catch (err) {
-          availableModels = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
-        }
-        
-        // Use selected model if available, otherwise use first available
-        if (currentModel === 'auto' || !availableModels.includes(currentModel)) {
-          currentModel = availableModels[0] || 'gemini-2.5-flash';
+        // If using Proxy, skip model listing (avoids 429s on official API)
+        if (styleMemory.selectedProvider === AIProvider.LOCAL_PROXY) {
+          currentModel = 'gemini-proxy-model'; // Dummy model name for proxy
+        } else {
+          // Try to get available models for this API key
+          let availableModels: string[] = [];
+          try {
+            availableModels = await geminiService.listAvailableModels(apiKey);
+          } catch (err) {
+            availableModels = ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-pro'];
+          }
+          
+          // Use selected model if available, otherwise use first available
+          if (currentModel === 'auto' || !availableModels.includes(currentModel)) {
+            currentModel = availableModels[0] || 'gemini-2.5-flash';
+          }
         }
       }
       
