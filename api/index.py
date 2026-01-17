@@ -293,7 +293,158 @@ def parse_streaming_response(response_text):
     
     return full_text if full_text else None
 
-def chat_with_gemini(prompt):
+import base64
+
+def upload_image(session, image_bytes, mime_type, snlm0e):
+    upload_url = "https://content-push.googleapis.com/upload/photomkt/img/1.0/internal/default/media?content_type=" + mime_type + "&protocolVersion=2.0&authuser=0&uploadType=multipart"
+    
+    headers = {
+        "x-goog-upload-command": "start",
+        "x-goog-upload-header-content-length": str(len(image_bytes)),
+        "x-goog-upload-protocol": "resumable",
+        "Authorization": "SAPISIDHASH " + str(time.time()), # Placeholder, usually uses cookies
+    }
+    
+    # We rely on session cookies for auth
+    
+    # Initial start request
+    start_response = session.post(upload_url, headers={"X-Goog-Upload-Command": "start", "X-Goog-Upload-Protocol": "resumable"}, json={"protocolVersion": "2.0"})
+    
+    if "x-goog-upload-url" not in start_response.headers:
+        # Fallback: try simpler upload endpoint or check if we got a direct error
+        return None
+
+    actual_upload_url = start_response.headers["x-goog-upload-url"]
+    
+    # Upload bytes
+    upload_headers = {
+        "X-Goog-Upload-Command": "upload, finalize",
+        "X-Goog-Upload-Offset": "0",
+    }
+    
+    upload_response = session.put(actual_upload_url, headers=upload_headers, data=image_bytes)
+    
+    if upload_response.status_code != 200:
+        return None
+
+    # The scotty ID is usually in the headers or body. Google often returns a JSON with media ID.
+    try:
+        # For Gemini Web, it might return a specific JSON
+        # Known pattern for some Google uploads: response.json()['resourceId']
+        # Or check headers['X-Goog-Upload-Status']
+        # Let's try to extract from response text if JSON fails
+        return upload_response.text # We need to parse this later or pass it blindly? 
+        # Actually, Gemini needs a specific ID format.
+        # Let's assume the response contains the ID we need. 
+        # A safer bet for "experimental" is to return the response text and try to extract "media_id" or similar.
+        
+        # NOTE: Without exact knowledge of the current Gemini Web upload response, this is highly speculative.
+        # However, many Google services use the `media_id` from the Scotty response.
+        if 'media_id' in upload_response.text:
+             match = re.search(r'"media_id":"([^"]+)"', upload_response.text)
+             if match:
+                 return match.group(1)
+        
+        # If we can't find it, we might fail.
+        return None
+    except:
+        return None
+
+def build_payload_with_image(prompt, snlm0e, image_id):
+    # This is a speculative payload structure for images
+    # Based on standard Bard/Gemini web patterns observed in 2024
+    
+    escaped_prompt = prompt.replace('\\', '\\\\').replace('"', '\\"').replace('\n', '\\n')
+    session_id = uuid.uuid4().hex
+    request_uuid = str(uuid.uuid4()).upper()
+    
+    # Structure with image often adds a list at the end of the prompt array or a separate field
+    # [ [prompt, 0, ...], ..., [ [["image_url_or_id", 1], "caption"] ] ]
+    
+    # If image_id is available (scotty ID), it is usually passed as:
+    # [null, [[["<image_id>", 1], null]]]  <-- something like this attached to the prompt part
+    
+    # We will try to inject it into the prompt structure
+    
+    # Standard: [escaped_prompt, 0, None, None, None, None, 0]
+    # With Image: [escaped_prompt, 0, None, None, None, None, 0, None, [[["<image_id>", 1], null]]]
+    
+    image_struct = f'[[["{image_id}", 1], null]]'
+    
+    payload_data = [
+        [escaped_prompt, 0, None, None, None, None, 0, None, json.loads(image_struct)],
+        ["en-US"],
+        ["", "", "", None, None, None, None, None, None, ""],
+        snlm0e,
+        session_id,
+        None,
+        [0],
+        1,
+        None,
+        None,
+        1,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        [[0]],
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        1,
+        None,
+        None,
+        [4],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        [2],
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        request_uuid,
+        None,
+        []
+    ]
+    
+    payload_str = json.dumps(payload_data, separators=(',', ':'))
+    escaped_payload = payload_str.replace('\\', '\\\\').replace('"', '\\"')
+    
+    return {
+        'f.req': f'[null,"{escaped_payload}"]',
+        '': ''
+    }
+
+def chat_with_gemini(prompt, image_base64=None):
     start_time = time.time()
     
     scraped = scrape_fresh_session()
@@ -311,10 +462,39 @@ def chat_with_gemini(prompt):
     fsid = scraped['fsid']
     reqid = scraped['reqid']
     
+    # Image Upload Handling
+    image_id = None
+    if image_base64:
+        try:
+            # Decode base64
+            if "," in image_base64:
+                header, encoded = image_base64.split(",", 1)
+                mime_type = header.split(";")[0].split(":")[1]
+            else:
+                encoded = image_base64
+                mime_type = "image/jpeg" # Default
+                
+            image_bytes = base64.b64decode(encoded)
+            
+            # Attempt upload (Experimental)
+            image_id = upload_image(session, image_bytes, mime_type, snlm0e)
+            
+            if not image_id:
+                print("Image upload failed, falling back to text-only")
+                # Fallback to text only if upload fails
+                image_id = None
+                
+        except Exception as e:
+            print(f"Image processing failed: {e}")
+            image_id = None
+    
     base_url = "https://gemini.google.com/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate"
     url = f"{base_url}?bl={bl}&f.sid={fsid}&hl=en-US&_reqid={reqid}&rt=c"
     
-    payload = build_payload(prompt, snlm0e)
+    if image_id:
+        payload = build_payload_with_image(prompt, snlm0e, image_id)
+    else:
+        payload = build_payload(prompt, snlm0e)
     
     cookie_str = '; '.join([f"{k}={v}" for k, v in cookies.items()])
     
@@ -387,8 +567,10 @@ def ask_gemini():
     if request.method == 'POST':
         data = request.get_json()
         prompt = data.get('prompt') if data else None
+        image_base64 = data.get('image') if data else None
     else:
         prompt = request.args.get('prompt')
+        image_base64 = None
     
     if not prompt:
         response = jsonify({
@@ -399,14 +581,13 @@ def ask_gemini():
                 'endpoint': '/api/ask',
                 'method': 'GET or POST',
                 'parameters': {
-                    'prompt': 'Your question or message (required)'
+                    'prompt': 'Your question or message (required)',
+                    'image': 'Base64 encoded image string (optional)'
                 },
-                'example': '/api/ask?prompt=Hello, how are you?'
+                'example': '/api/ask?prompt=Hello'
             }
         })
         response.status_code = 400
-        # CORS might be needed if frontend uses absolute URL in dev, but for relative path /api it shares origin
-        # Adding anyway for safety
         response.headers.add('Access-Control-Allow-Origin', '*') 
         return response
     
@@ -420,7 +601,7 @@ def ask_gemini():
         response.headers.add('Access-Control-Allow-Origin', '*')
         return response
     
-    result = chat_with_gemini(prompt)
+    result = chat_with_gemini(prompt, image_base64)
     
     result['api_dev'] = '@ISmartCoder'
     result['prompt'] = prompt

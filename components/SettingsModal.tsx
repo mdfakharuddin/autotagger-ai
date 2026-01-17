@@ -246,7 +246,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                           {provider === AIProvider.GEMINI 
                             ? "Use Google's official API. Required: API Key." 
-                            : "Use the built-in Vercel API (serverless python function). Text-only support."}
+                            : "Use the built-in Vercel API (serverless python function). Experimental image support."}
                         </p>
                       </div>
                     </label>

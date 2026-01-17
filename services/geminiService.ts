@@ -346,20 +346,22 @@ Return ONLY the JSON object.` }
     // Check for Local Proxy Provider
     if (styleMemory.selectedProvider === AIProvider.LOCAL_PROXY) {
       try {
-        // Construct a text-only prompt since proxy doesn't support images yet
-        const textPrompt = `
-${promptParts[0].text}
-
-Note: This request is via proxy. If image data was expected, it is missing.
-Please generate generic metadata suitable for stock photography based on the context provided in the prompt instructions above.
-`;
+        const payload: any = { prompt: promptParts[0].text }; // Use the main text prompt
         
+        // Handle Image Data for Proxy
+        if (data.base64) {
+           payload.image = data.base64;
+        } else if (data.frames && data.frames.length > 0) {
+           // If video frames, take the first one
+           payload.image = data.frames[0];
+        }
+
         const response = await fetch('/api/ask', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ prompt: textPrompt })
+          body: JSON.stringify(payload)
         });
 
         if (!response.ok) {
