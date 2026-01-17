@@ -1073,15 +1073,29 @@ function App() {
     setIsProcessingUpload(false);
   };
 
+  // Refs for queue processing to avoid effect resets
+  const filesRef = useRef(files);
+  const workingApiModelsRef = useRef(workingApiModels);
+  const styleMemoryRef = useRef(styleMemory);
+  
+  // Keep refs in sync
+  useEffect(() => { filesRef.current = files; }, [files]);
+  useEffect(() => { workingApiModelsRef.current = workingApiModels; }, [workingApiModels]);
+  useEffect(() => { styleMemoryRef.current = styleMemory; }, [styleMemory]);
+
   useEffect(() => {
     if (!isQueueActive) return;
     
     const tick = setInterval(() => {
-      // STRICT CONCURRENCY ENFORCEMENT: Capacity based ONLY on workingApiModels.length
-      // BUT: Allow 1 file to process when workingApiModels.length === 0 to discover first API
-      // AND: If using Proxy, STRICTLY limit to 1 concurrent request
-      const isProxy = styleMemory.selectedProvider === AIProvider.LOCAL_PROXY;
-      const maxConcurrent = isProxy ? 1 : (workingApiModels.length === 0 ? 1 : workingApiModels.length);
+      // Use refs to get latest state without resetting the interval
+      const currentFiles = filesRef.current;
+      const currentWorkingModels = workingApiModelsRef.current;
+      const currentStyleMemory = styleMemoryRef.current;
+      
+      // STRICT CONCURRENCY ENFORCEMENT
+      // If using Proxy, STRICTLY limit to 1 concurrent request
+      const isProxy = currentStyleMemory.selectedProvider === AIProvider.LOCAL_PROXY;
+      const maxConcurrent = isProxy ? 1 : (currentWorkingModels.length === 0 ? 1 : currentWorkingModels.length);
       
       // Calculate available slots (strict enforcement)
       const availableSlots = maxConcurrent - activeProcessingIds.current.size;
@@ -1092,7 +1106,7 @@ function App() {
       }
       
       // Get pending files that are not already processing
-      const pending = files.filter(f => 
+      const pending = currentFiles.filter(f => 
         f.status === ProcessingStatus.PENDING && 
         !activeProcessingIds.current.has(f.id)
       );
@@ -1100,17 +1114,17 @@ function App() {
       // Process exactly as many files as we have available slots
       const filesToProcess = pending.slice(0, availableSlots);
       
-      // Dispatch files for processing (each will reserve a slot in processFile)
+      // Dispatch files for processing
       for (const file of filesToProcess) {
-        processFile(file);
+        // Double check not already processing (concurrency safety)
+        if (!activeProcessingIds.current.has(file.id)) {
+          processFile(file);
+        }
       }
-      
-      // No background testing - APIs are discovered through real processing only
-      // This prevents 429 errors and quota consumption from testing
     }, 1000);
 
     return () => clearInterval(tick);
-  }, [files, isQueueActive, apiKeys, processFile, allApisExhausted, workingApiModels, isTestingApis, testAllApiModelCombinations]);
+  }, [isQueueActive, processFile]);
 
   const handleGenerateVariant = async (id: string) => {
     const item = files.find(f => f.id === id);
